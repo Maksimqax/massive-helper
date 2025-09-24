@@ -4,11 +4,20 @@ from aiogram import Bot, Dispatcher, types
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Update
+from aiogram.filters import Command
 
 TOKEN = os.getenv("BOT_TOKEN")
+if not TOKEN:
+    raise RuntimeError("BOT_TOKEN env var is not set")
+
 bot = Bot(TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 app = FastAPI()
+
+# --- Healthcheck (удобно проверять, что сервис жив) ---
+@app.get("/ping")
+async def ping():
+    return {"status": "ok"}
 
 # Главное меню
 def main_menu():
@@ -36,7 +45,7 @@ def video_menu():
     kb.button(text="↩️ Назад", callback_data="back_main")
     return kb.as_markup()
 
-@dp.message(commands=["start"])
+@dp.message(Command("start"))
 async def start_cmd(message: types.Message):
     await message.answer("Выберите категорию:", reply_markup=main_menu())
 
@@ -50,23 +59,24 @@ async def callbacks(cb: types.CallbackQuery):
     elif cb.data == "back_main":
         await cb.message.edit_text("Возврат в главное меню:", reply_markup=main_menu())
     elif cb.data == "audio_from_video":
-        await cb.message.answer("Отправьте видео, я извлеку из него звук 🎶")
+        await cb.message.answer("Отправьте видео (mp4/mov, до 50 МБ), я извлеку из него звук 🎶")
     elif cb.data == "audio_from_circle":
-        await cb.message.answer("Отправьте кружок, я извлеку из него звук 🔄")
+        await cb.message.answer("Отправьте кружок (video note), я извлеку из него звук 🔄")
     elif cb.data == "audio_from_voice":
-        await cb.message.answer("Отправьте голосовое, я преобразую его 🎤")
+        await cb.message.answer("Отправьте голосовое, я преобразую его в аудиофайл 🎤")
     elif cb.data == "audio_to_voice":
-        await cb.message.answer("Отправьте аудиофайл, я превращу его в голосовое 🎧")
+        await cb.message.answer("Отправьте аудиофайл (mp3/m4a/ogg), я превращу его в голосовое 🎧")
     elif cb.data == "video_to_voice":
         await cb.message.answer("Отправьте видео/кружок, я сделаю из него голосовое 🎥")
     elif cb.data == "video_to_circle":
-        await cb.message.answer("Отправьте видео, я сделаю из него кружок 📼")
+        await cb.message.answer("Отправьте видео (до 60 c, 1:1 желательно), я сделаю из него кружок 📼")
     elif cb.data == "circle_to_video":
         await cb.message.answer("Отправьте кружок, я сделаю из него обычное видео 🔄")
 
+# Вебхук для Telegram (POST)
 @app.post("/")
 async def webhook(request: Request):
     data = await request.json()
-    update = Update.model_validate(data, context={"bot": bot})
+    update = Update.model_validate(data)
     await dp.feed_update(bot, update)
     return {"ok": True}
