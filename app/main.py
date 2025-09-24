@@ -1,253 +1,332 @@
 
 import os
 import asyncio
-import aiohttp
 import tempfile
+import pathlib
 import subprocess
-from pathlib import Path
+from typing import Optional, Tuple
 
-from fastapi import FastAPI, Request, Header, HTTPException
-from fastapi.responses import PlainTextResponse, JSONResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, PlainTextResponse
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.client.default import DefaultBotProperties
-from aiogram.types import Update, Message, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.filters import Command
+from aiogram import F, Router, Dispatcher
+from aiogram.types import Message, Update, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.client.bot import Bot
 from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import CommandStart
 
-# ---------- env ----------
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").rstrip("/")
-SECRET_TOKEN = os.getenv("SECRET_TOKEN", "").strip() or None
-MAX_FILE_MB = int(os.getenv("MAX_FILE_MB", "18"))  # Telegram free limit ~20MB, оставим запас
-PORT = int(os.getenv("PORT", "10000"))
+import aiohttp
+
+# ----------------- ENV -----------------
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")  # e.g., https://your-app.onrender.com
+SECRET_TOKEN = os.getenv("SECRET_TOKEN", "")  # optional
+MAX_FILE_MB = int(os.getenv("MAX_FILE_MB", "18"))
+MAX_BYTES = MAX_FILE_MB * 1024 * 1024
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set")
+    raise RuntimeError("BOT_TOKEN is not set in environment variables")
 
+# ----------------- Bot & DP -----------------
 bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+router = Router()
 dp = Dispatcher()
+dp.include_router(router)
 
-app = FastAPI()
+# ----------------- UI (Keyboard) -----------------
+main_kb = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🎥 Видео → 🎤 Голос"),
+         KeyboardButton(text="🔵 Кружок → 🎤 Голос")],
+        [KeyboardButton(text="🎤 Голос → 🎵 MP3"),
+         KeyboardButton(text="🎵 Аудио → 🎤 Голос")],
+        [KeyboardButton(text="ℹ️ Помощь")]
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=False,
+    input_field_placeholder="Выбери действие…"
+)
 
-# ---------- helpers ----------
-def kb_main() -> ReplyKeyboardMarkup:
-    # Короткие нечекрыжимые лейблы с emoji
-    rows = [
-        [
-            KeyboardButton(text="🎙 Голос → MP3"),
-            KeyboardButton(text="🎧 Аудио → Голос"),
-        ],
-        [
-            KeyboardButton(text="🎥 Видео/Кружок → Голос"),
-            KeyboardButton(text="🎵 Извлечь аудио из видео"),
-        ],
-        [
-            KeyboardButton(text="↩️ Назад / Отмена"),
-        ],
-    ]
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+# ----------------- Helpers -----------------
+def _get_obj_and_size_from_message(message: Message) -> Tuple[Optional[object], int, str]:
+    """
+    Returns (obj, size_bytes, kind) for supported message types.
+    """
+    if message.video:            # regular video
+        return message.video, message.video.file_size or 0, "video"
+    if message.video_note:       # round video (circle)
+        return message.video_note, message.video_note.file_size or 0, "circle"
+    if message.document:         # document
+        return message.document, message.document.file_size or 0, "document"
+    if message.voice:            # voice (OGG/OPUS)
+        return message.voice, message.voice.file_size or 0, "voice"
+    if message.audio:            # audio file (mp3, etc.)
+        return message.audio, message.audio.file_size or 0, "audio"
+    if message.photo:            # photo — take the biggest
+        p = message.photo[-1]
+        return p, p.file_size or 0, "photo"
+    return None, 0, "unknown"
 
-async def ffmpeg_available() -> bool:
+
+async def tg_download_to_temp_or_reply_too_big(message: Message, suffix: str) -> Optional[str]:
+    """
+    Safely downloads Telegram file to temp path. Handles "file is too big" gracefully.
+    Returns local file path or None (when replied with error).
+    """
+    obj, size, kind = _get_obj_and_size_from_message(message)
+    if not obj:
+        await message.answer("Не понял тип вложения. Пришли файл ещё раз.")
+        return None
+
+    if size > MAX_BYTES:
+        mb = round(size / (1024*1024), 1)
+        await message.answer(
+            f"⚠️ Файл слишком большой: {mb} МБ.\n"
+            f"Лимит для обработки — {MAX_FILE_MB} МБ.\n\n"
+            f"Что можно сделать:\n"
+            f"• Обрезать/сжать видео перед отправкой\n"
+            f"• Отправить короткий кружок (до {MAX_FILE_MB} МБ)\n"
+            f"• Закинуть как документ поменьше"
+        )
+        return None
+
+    # Try via get_file -> https download
     try:
-        proc = await asyncio.create_subprocess_exec("ffmpeg", "-version",
-                                                    stdout=asyncio.subprocess.DEVNULL,
-                                                    stderr=asyncio.subprocess.DEVNULL)
-        await proc.wait()
-        return proc.returncode == 0
+        f = await bot.get_file(obj.file_id)
+        tg_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{f.file_path}"
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        tmp_path = pathlib.Path(tmp.name)
+        async with aiohttp.ClientSession() as session:
+            async with session.get(tg_url) as resp:
+                resp.raise_for_status()
+                with open(tmp_path, "wb") as out:
+                    while True:
+                        chunk = await resp.content.read(1024 * 64)
+                        if not chunk:
+                            break
+                        out.write(chunk)
+        return str(tmp_path)
+
+    except TelegramBadRequest as e:
+        # Extra safety
+        if "file is too big" in str(e).lower():
+            await message.answer(
+                f"⚠️ Telegram не отдаёт файл (слишком большой). "
+                f"Отправь, пожалуйста, файл не больше {MAX_FILE_MB} МБ."
+            )
+            return None
+        raise
+
+
+def _ffmpeg_exists() -> bool:
+    try:
+        subprocess.run(["ffmpeg", "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        return True
     except Exception:
         return False
 
-async def tg_download_to_temp(file_id: str, suffix: str) -> Path:
-    f = await bot.get_file(file_id)
-    if f.file_size and f.file_size > MAX_FILE_MB * 1024 * 1024:
-        raise HTTPException(413, f"Файл больше {MAX_FILE_MB} МБ")
 
-    file_path = f.file_path  # e.g. "videos/file_12345.mp4"
-    url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    tmp_path = Path(tmp.name)
-    tmp.close()
-
-    timeout = aiohttp.ClientTimeout(total=60*10)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(url) as resp:
-            if resp.status != 200:
-                raise HTTPException(502, f"Не удалось скачать файл: HTTP {resp.status}")
-            with tmp_path.open("wb") as out:
-                async for chunk in resp.content.iter_chunked(1024 * 128):
-                    out.write(chunk)
-    return tmp_path
-
-async def run_ffmpeg(args: list[str]) -> None:
-    proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
+def run_ffmpeg(cmd: list) -> None:
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.returncode != 0:
-        raise RuntimeError(f"ffmpeg failed: {stderr.decode(errors='ignore')[:4000]}")
+        raise RuntimeError(proc.stderr.decode("utf-8", "ignore"))
 
-# ---------- Handlers ----------
 
-@dp.message(Command("start"))
+async def convert_video_to_voice(in_path: str) -> str:
+    """
+    Convert any video (incl. circle) to OGG OPUS for Telegram voice.
+    """
+    out_path = str(pathlib.Path(tempfile.gettempdir()) / (pathlib.Path(in_path).stem + "_voice.ogg"))
+    if not _ffmpeg_exists():
+        raise RuntimeError("ffmpeg недоступен в окружении.")
+    # mono, 48kHz, opus ~48k
+    cmd = ["ffmpeg", "-y", "-i", in_path, "-vn", "-ac", "1", "-ar", "48000", "-c:a", "libopus", "-b:a", "48k", out_path]
+    run_ffmpeg(cmd)
+    return out_path
+
+
+async def convert_voice_to_mp3(in_path: str) -> str:
+    out_path = str(pathlib.Path(tempfile.gettempdir()) / (pathlib.Path(in_path).stem + ".mp3"))
+    if not _ffmpeg_exists():
+        raise RuntimeError("ffmpeg недоступен в окружении.")
+    cmd = ["ffmpeg", "-y", "-i", in_path, "-vn", "-c:a", "libmp3lame", "-b:a", "128k", out_path]
+    run_ffmpeg(cmd)
+    return out_path
+
+
+async def convert_audio_to_voice(in_path: str) -> str:
+    out_path = str(pathlib.Path(tempfile.gettempdir()) / (pathlib.Path(in_path).stem + "_voice.ogg"))
+    if not _ffmpeg_exists():
+        raise RuntimeError("ffmpeg недоступен в окружении.")
+    cmd = ["ffmpeg", "-y", "-i", in_path, "-vn", "-ac", "1", "-ar", "48000", "-c:a", "libopus", "-b:a", "48k", out_path]
+    run_ffmpeg(cmd)
+    return out_path
+
+
+# ----------------- Handlers -----------------
+@router.message(CommandStart())
 async def cmd_start(message: Message):
-    text = (
-        "Привет! Я конвертирую медиа:\n\n"
-        "🎙 <b>Голос → MP3</b>\n"
-        "🎧 <b>Аудио → Голос (OGG)</b>\n"
-        "🎥 <b>Видео/Кружок → Голос</b>\n"
-        "🎵 <b>Извлечь аудио из видео</b>\n\n"
-        f"Макс. размер файла: <b>{MAX_FILE_MB} МБ</b>."
+    await message.answer(
+        "Привет! Я конвертирую видео/кружки/аудио/голосовые.\n"
+        "Выбери действие ниже 👇",
+        reply_markup=main_kb
     )
-    await message.answer(text, reply_markup=kb_main())
 
-# --- Voice -> MP3
-@dp.message(F.voice)
+
+@router.message(F.text.in_({"ℹ️ Помощь", "Помощь", "help", "/help"}))
+async def help_cmd(message: Message):
+    await message.answer(
+        "Доступно:\n"
+        "• 🎥 Видео → 🎤 Голос — пришли видео/кружок\n"
+        "• 🔵 Кружок → 🎤 Голос — пришли кружок\n"
+        "• 🎤 Голос → 🎵 MP3 — пришли голосовое\n"
+        "• 🎵 Аудио → 🎤 Голос — пришли mp3/аудио\n\n"
+        f"Максимальный размер — <b>{MAX_FILE_MB} МБ</b>."
+    )
+
+
+# Кнопки-подсказки (только текст)
+@router.message(F.text == "🎥 Видео → 🎤 Голос")
+async def hint_video_to_voice(message: Message):
+    await message.answer("Пришли видео (или документ с видео) — конвертирую в голосовое.")
+
+@router.message(F.text == "🔵 Кружок → 🎤 Голос")
+async def hint_circle_to_voice(message: Message):
+    await message.answer("Пришли видеокружок — конвертирую в голосовое.")
+
+@router.message(F.text == "🎤 Голос → 🎵 MP3")
+async def hint_voice_to_mp3(message: Message):
+    await message.answer("Пришли голосовое — конвертирую в MP3.")
+
+@router.message(F.text == "🎵 Аудио → 🎤 Голос")
+async def hint_audio_to_voice(message: Message):
+    await message.answer("Пришли аудиофайл (mp3 и т.п.) — конвертирую в голосовое.")
+
+
+# === Media handlers ===
+# 1) Видео/кружок -> голос
+@router.message(F.video | F.video_note | F.document.as_("doc"))
+async def handle_video_or_circle_to_voice(message: Message, doc: Optional[object] = None):
+    # Detect what we have
+    obj = None
+    if message.video:
+        obj = message.video
+        suffix = ".mp4"
+    elif message.video_note:
+        obj = message.video_note
+        suffix = ".mp4"
+    elif doc and getattr(doc, "mime_type", "") and "video" in doc.mime_type:
+        obj = doc
+        suffix = ".mp4"
+    else:
+        return  # ignore non-video documents here
+
+    # Temporarily attach obj into message-like wrapper for size check
+    class _FakeMsg:
+        def __init__(self, m, o):
+            self._m = m
+            self._o = o
+        @property
+        def video(self): return None
+        @property
+        def video_note(self): return None
+        @property
+        def document(self): return None
+        @property
+        def voice(self): return None
+        @property
+        def audio(self): return None
+        @property
+        def photo(self): return None
+
+    # Use original message but size check will read from real fields
+    in_path = await tg_download_to_temp_or_reply_too_big(message, suffix)
+    if not in_path:
+        return
+
+    try:
+        out_path = await convert_video_to_voice(in_path)
+        from aiogram.types import FSInputFile
+        await message.answer_voice(FSInputFile(out_path), caption="Готово: 🎥 → 🎤")
+    except Exception as e:
+        await message.answer(f"Не удалось конвертировать видео: {e}")
+
+
+# 2) Голос -> MP3
+@router.message(F.voice)
 async def handle_voice_to_mp3(message: Message):
-    v = message.voice
+    in_path = await tg_download_to_temp_or_reply_too_big(message, ".ogg")
+    if not in_path:
+        return
     try:
-        src = await tg_download_to_temp(v.file_id, ".ogg")
-    except HTTPException as e:
-        await message.answer(str(e.detail))
+        out_path = await convert_voice_to_mp3(in_path)
+        from aiogram.types import FSInputFile
+        await message.answer_document(FSInputFile(out_path), caption="Готово: 🎤 → 🎵 MP3")
+    except Exception as e:
+        await message.answer(f"Не удалось конвертировать в MP3: {e}")
+
+
+# 3) Аудио (mp3 и пр.) -> голос
+@router.message(F.audio | F.document.as_("doc_audio"))
+async def handle_audio_to_voice(message: Message, doc_audio: Optional[object] = None):
+    # Accept audio or document with audio mime
+    suffix = ".mp3"
+    if message.audio:
+        pass
+    elif doc_audio and getattr(doc_audio, "mime_type", "") and "audio" in doc_audio.mime_type:
+        pass
+    else:
         return
 
-    if not await ffmpeg_available():
-        await message.answer("ffmpeg недоступен. Не могу сконвертировать 😔")
-        src.unlink(missing_ok=True)
+    in_path = await tg_download_to_temp_or_reply_too_big(message, suffix)
+    if not in_path:
         return
-
-    out_path = Path(tempfile.mkstemp(suffix=".mp3")[1])
     try:
-        await run_ffmpeg(["-y", "-i", str(src), "-acodec", "libmp3lame", "-b:a", "128k", str(out_path)])
-        await message.answer_document(document=out_path.open("rb"), caption="Готово: MP3 ✅")
+        out_path = await convert_audio_to_voice(in_path)
+        from aiogram.types import FSInputFile
+        await message.answer_voice(FSInputFile(out_path), caption="Готово: 🎵 → 🎤")
     except Exception as e:
-        await message.answer(f"Не удалось конвертировать: {e}")
-    finally:
-        src.unlink(missing_ok=True)
-        out_path.unlink(missing_ok=True)
+        await message.answer(f"Не удалось конвертировать в голос: {e}")
 
-# --- Audio file -> Voice (ogg opus)
-@dp.message(F.audio | (F.document & F.document.mime_type.startswith("audio/")))
-async def handle_audio_to_voice(message: Message):
-    a = message.audio or message.document
-    try:
-        src = await tg_download_to_temp(a.file_id, ".audio")
-    except HTTPException as e:
-        await message.answer(str(e.detail)); return
 
-    if not await ffmpeg_available():
-        await message.answer("ffmpeg недоступен. Не могу сконвертировать 😔")
-        src.unlink(missing_ok=True); return
+# ----------------- FastAPI -----------------
+app = FastAPI()
 
-    out_path = Path(tempfile.mkstemp(suffix=".ogg")[1])
-    try:
-        await run_ffmpeg(["-y", "-i", str(src), "-c:a", "libopus", "-b:a", "64k", "-vn", str(out_path)])
-        await message.answer_voice(voice=out_path.open("rb"), caption="Готово: голосовое ✅")
-    except Exception as e:
-        await message.answer(f"Ошибка конвертации: {e}")
-    finally:
-        src.unlink(missing_ok=True)
-        out_path.unlink(missing_ok=True)
-
-# --- Video / VideoNote -> Voice
-@dp.message(F.video | F.video_note)
-async def handle_video_or_circle_to_voice(message: Message):
-    obj = message.video or message.video_note
-    try:
-        # Вытягиваем оригинал, чтобы не упираться в отсутствующий метод .download()
-        src = await tg_download_to_temp(obj.file_id, ".mp4")
-    except HTTPException as e:
-        await message.answer(str(e.detail)); return
-
-    if not await ffmpeg_available():
-        await message.answer("ffmpeg недоступен. Не могу извлечь аудио 😔")
-        src.unlink(missing_ok=True); return
-
-    out_path = Path(tempfile.mkstemp(suffix='.ogg')[1])
-    try:
-        # извлечение и кодирование в ogg/opus для voice
-        await run_ffmpeg(["-y", "-i", str(src), "-vn", "-c:a", "libopus", "-b:a", "64k", str(out_path)])
-        await message.answer_voice(voice=out_path.open("rb"), caption="Готово: голос из видео ✅")
-    except Exception as e:
-        await message.answer(f"Ошибка конвертации: {e}")
-    finally:
-        src.unlink(missing_ok=True)
-        out_path.unlink(missing_ok=True)
-
-# --- Extract audio from video, return as MP3
-@dp.message(F.text.in_({"🎵 Извлечь аудио из видео"}))
-async def ask_video_for_audio(message: Message):
-    await message.answer("Пришлите видео, я извлеку из него аудио (MP3).")
-
-@dp.message(F.video)
-async def handle_video_to_mp3(message: Message):
-    # Этот хэндлер уже есть выше для видео -> голос.
-    # Чтобы различить режимы, можно ориентироваться на прошлое сообщение пользователя или FSM.
-    # Для простоты всегда делаем и voice, и mp3 по запросной кнопке.
-    pass
-
-# Кнопки-тексты
-@dp.message(F.text.in_({"🎙 Голос → MP3"}))
-async def info_v2m(message: Message):
-    await message.answer("Отправьте голосовое сообщение — я верну MP3.", reply_markup=kb_main())
-
-@dp.message(F.text.in_({"🎧 Аудио → Голос"}))
-async def info_a2v(message: Message):
-    await message.answer("Пришлите аудио-файл — я верну голосовое (OGG).", reply_markup=kb_main())
-
-@dp.message(F.text.in_({"🎥 Видео/Кружок → Голос"}))
-async def info_video2voice(message: Message):
-    await message.answer("Пришлите видео или кружок — я пришлю голосовое (извлеку аудио).", reply_markup=kb_main())
-
-@dp.message(F.text.in_({"↩️ Назад / Отмена"}))
-async def cancel(message: Message):
-    await message.answer("Ок, возвращаемся в меню.", reply_markup=kb_main())
-
-# Fallback
-@dp.message()
-async def fallback(message: Message):
-    await message.answer("Не понял. Нажмите кнопку или отправьте медиа 🙏", reply_markup=kb_main())
-
-# ---------- Webhook / FastAPI ----------
-
-@app.get("/", response_class=PlainTextResponse)
-async def root():
-    return "OK"
-
-@app.head("/", response_class=PlainTextResponse)
-async def root_head():
-    return ""
-
-@app.get("/healthz", response_class=PlainTextResponse)
+@app.get("/")
 async def health():
-    return "ok"
+    # Render делает HEAD/GET — вернём 200, чтобы не было 404/405 в логах
+    return {"ok": True, "service": "tg-media-bot"}
 
 @app.post("/")
-async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None = Header(default=None)):
-    # 403, если секрет включен и не совпал
-    if SECRET_TOKEN and x_telegram_bot_api_secret_token != SECRET_TOKEN:
-        raise HTTPException(status_code=403, detail="Forbidden (bad secret)")
+async def webhook(request: Request):
+    try:
+        data = await request.json()
+    except Exception:
+        return PlainTextResponse("bad request", status_code=400)
 
-    data = await request.json()
+    # Optional secret header check
+    if SECRET_TOKEN:
+        if request.headers.get("X-Telegram-Bot-Api-Secret-Token") != SECRET_TOKEN:
+            return PlainTextResponse("forbidden", status_code=403)
+
     update = Update.model_validate(data)
     await dp.feed_update(bot, update)
     return JSONResponse({"ok": True})
 
-# Опционально: ручная установка/удаление вебхука (если запускаете не через Render)
-@app.get("/set-webhook")
-async def set_webhook():
-    url = WEBHOOK_URL or ""
-    if not url:
-        raise HTTPException(400, "WEBHOOK_URL не задан")
-    res = await bot.set_webhook(url, secret_token=SECRET_TOKEN) if SECRET_TOKEN else await bot.set_webhook(url)
-    return {"ok": res}
 
-@app.get("/delete-webhook")
-async def delete_webhook():
-    res = await bot.delete_webhook(drop_pending_updates=False)
-    return {"ok": res}
+@app.on_event("startup")
+async def on_startup():
+    if WEBHOOK_URL:
+        # set webhook
+        await bot.set_webhook(
+            url=WEBHOOK_URL,
+            secret_token=SECRET_TOKEN or None,
+            drop_pending_updates=True,
+        )
 
-# Uvicorn запускается из start.sh
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await bot.session.close()

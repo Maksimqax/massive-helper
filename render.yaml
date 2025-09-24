@@ -1,14 +1,16 @@
 services:
   - type: web
-    name: massive-helper
+    name: tg-media-bot
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
-    startCommand: bash start.sh
+    startCommand: ./start.sh
     envVars:
       - key: BOT_TOKEN
         sync: false
-    autoDeploy: false
-    # Install ffmpeg during runtime via apt (supported on Render Python runtime)
-    preDeployCommand: |
-      apt-get update && apt-get install -y ffmpeg || true
+      - key: WEBHOOK_URL
+        sync: false
+      - key: SECRET_TOKEN
+        sync: false
+      - key: MAX_FILE_MB
+        value: "18"
