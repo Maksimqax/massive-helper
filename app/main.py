@@ -1,313 +1,230 @@
+
 import os
 import asyncio
-import tempfile
+import logging
+from uuid import uuid4
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, Request
-from aiogram import Bot, Dispatcher, types
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Update
-from aiogram.filters import Command
+from fastapi.responses import JSONResponse, PlainTextResponse
+
+from aiogram import Bot, Dispatcher, F, Router
+from aiogram.types import Message, Update
+from aiogram.filters import CommandStart, Command
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types.input_file import FSInputFile
 
-TOKEN = os.getenv("BOT_TOKEN")
-if not TOKEN:
+# ------------ Config ------------
+logging.basicConfig(level=logging.INFO)
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN env var is not set")
 
-bot = Bot(TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
-app = FastAPI()
+bot = Bot(BOT_TOKEN)
+dp = Dispatcher()
+router = Router()
+dp.include_router(router)
 
-# ---------- Healthcheck ----------
-@app.get("/ping")
-async def ping():
-    return {"status": "ok"}
+# ------------ UI -------------
+MENU_BUTTONS = [
+    [KeyboardButton(text="ВИДЕО → АУДИО"), KeyboardButton(text="КРУЖОК → АУДИО")],
+    [KeyboardButton(text="ГОЛОС → MP3"), KeyboardButton(text="АУДИО → ГОЛОС")],
+    [KeyboardButton(text="ВИДЕО/КРУЖОК → ГОЛОС")],
+    [KeyboardButton(text="ВИДЕО → КРУЖОК"), KeyboardButton(text="КРУЖОК → ВИДЕО")],
+]
 
-# ---------- Helper: run ffmpeg ----------
-async def run_ffmpeg(cmd: list):
-    proc = await asyncio.create_subprocess_exec(
-        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-    )
-    _stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        err = stderr.decode("utf-8", errors="ignore")[:4000]
-        raise RuntimeError(f"ffmpeg error: {err}")
+kb_main = ReplyKeyboardMarkup(keyboard=MENU_BUTTONS, resize_keyboard=True)
 
-# ---------- FSM States ----------
-class Flow(StatesGroup):
-    audio_from_video = State()
-    audio_from_circle = State()
-    audio_from_voice = State()
+class ConvState(StatesGroup):
+    video_to_audio = State()
+    circle_to_audio = State()
+    voice_to_mp3 = State()
     audio_to_voice = State()
-    video_to_voice = State()
+    vid_or_circle_to_voice = State()
     video_to_circle = State()
     circle_to_video = State()
 
-# ---------- Keyboards ----------
-def main_menu():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="Аудио 🔊", callback_data="menu_audio")
-    kb.button(text="Видео / Кружок 🎦", callback_data="menu_video")
-    kb.adjust(2)
-    return kb.as_markup()
+# ------------ Helpers -------------
 
-def audio_menu():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="Видео → аудио", callback_data="audio_from_video")
-    kb.button(text="Кружок → аудио", callback_data="audio_from_circle")
-    kb.button(text="Голосов. → аудио", callback_data="audio_from_voice")
-    kb.button(text="Аудио → голос.", callback_data="audio_to_voice")
-    kb.button(text="Вид/Круж → голос.", callback_data="video_to_voice")
-    kb.button(text="↩️ Назад", callback_data="back_main")
-    kb.adjust(2, 2, 2)
-    return kb.as_markup()
+TMP = Path("/tmp")
 
-def video_menu():
-    kb = InlineKeyboardBuilder()
-    kb.button(text="Видео → кружок", callback_data="video_to_circle")
-    kb.button(text="Кружок → видео", callback_data="circle_to_video")
-    kb.button(text="↩️ Назад", callback_data="back_main")
-    kb.adjust(2, 1)
-    return kb.as_markup()
+async def run_ffmpeg(args: list[str]) -> None:
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed: {stderr.decode('utf-8', errors='ignore')}")
 
-# ---------- Entrypoints ----------
-@dp.message(Command("start"))
-async def start_cmd(message: types.Message, state: FSMContext):
+async def make_in_path_from_file_id(file_id: str, default_ext: str = ".dat") -> Path:
+    """
+    Resolves Telegram file extension via get_file.
+    Returns a unique path to store the downloaded source file.
+    """
+    f = await bot.get_file(file_id)
+    ext = Path(f.file_path).suffix or default_ext
+    in_path = TMP / f"{uuid4()}{ext}"
+    await bot.download(file_id, destination=in_path)
+    return in_path
+
+def out_path(ext: str) -> Path:
+    return TMP / f"{uuid4()}{ext}"
+
+# ------------ Handlers -------------
+
+@router.message(CommandStart())
+async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
-    await message.answer("👋 Привет! Выберите категорию:", reply_markup=main_menu())
+    await message.answer(
+        "Выберите функцию и пришлите подходящий файл.\n"
+        "Поддержка:\n"
+        "• Видео/кружок → аудио OGG\n"
+        "• Голос → MP3\n"
+        "• Аудио → голос (OGG/Opus)\n"
+        "• Видео/кружок → голос\n"
+        "• Видео ↔️ кружок",
+        reply_markup=kb_main,
+    )
 
-@dp.callback_query()
-async def callbacks(cb: types.CallbackQuery, state: FSMContext):
-    if cb.data == "menu_audio":
-        await state.clear()
-        await cb.message.edit_text(
-            "🔊 **Аудио — выберите услугу:**\n"
-            "• Видео → аудио (извлечь звук)\n"
-            "• Кружок → аудио (звук из video note)\n"
-            "• Голосовое → аудио (mp3)\n"
-            "• Аудио → голосовое (voice)\n"
-            "• Видео/кружок → голосовое (voice)",
-            reply_markup=audio_menu(),
-            parse_mode="Markdown"
-        )
-    elif cb.data == "menu_video":
-        await state.clear()
-        await cb.message.edit_text(
-            "🎦 **Видео / Кружок — выберите услугу:**\n"
-            "• Видео → кружок (video note)\n"
-            "• Кружок → видео (mp4)",
-            reply_markup=video_menu(),
-            parse_mode="Markdown"
-        )
-    elif cb.data == "back_main":
-        await state.clear()
-        await cb.message.edit_text("↩️ Возврат в главное меню:", reply_markup=main_menu())
+@router.message(Command("ping"))
+async def cmd_ping(message: Message):
+    await message.answer("pong")
 
-    # Set states and prompt
-    elif cb.data == "audio_from_video":
-        await state.set_state(Flow.audio_from_video)
-        await cb.message.answer("Отправьте **видео** (mp4/mov ≤ ~50 МБ). Я извлеку из него звук и пришлю файл.", parse_mode="Markdown")
-    elif cb.data == "audio_from_circle":
-        await state.set_state(Flow.audio_from_circle)
-        await cb.message.answer("Отправьте **кружок** (video note). Я извлеку из него звук и пришлю файл.", parse_mode="Markdown")
-    elif cb.data == "audio_from_voice":
-        await state.set_state(Flow.audio_from_voice)
-        await cb.message.answer("Отправьте **голосовое**. Я конвертирую его в обычный аудиофайл (mp3).", parse_mode="Markdown")
-    elif cb.data == "audio_to_voice":
-        await state.set_state(Flow.audio_to_voice)
-        await cb.message.answer("Отправьте **аудиофайл** (mp3/m4a/ogg). Я превращу его в *voice*.", parse_mode="Markdown")
-    elif cb.data == "video_to_voice":
-        await state.set_state(Flow.video_to_voice)
-        await cb.message.answer("Отправьте **видео или кружок**. Я извлеку звук и пришлю *voice*.", parse_mode="Markdown")
-    elif cb.data == "video_to_circle":
-        await state.set_state(Flow.video_to_circle)
-        await cb.message.answer("Отправьте **видео** (желательно ≤ 60с). Сделаю из него *кружок* (video note).", parse_mode="Markdown")
-    elif cb.data == "circle_to_video":
-        await state.set_state(Flow.circle_to_video)
-        await cb.message.answer("Отправьте **кружок**. Конвертирую его в обычное **видео** (mp4).", parse_mode="Markdown")
+# --- choose modes
+@router.message(F.text == "ВИДЕО → АУДИО")
+async def choose_v2a(message: Message, state: FSMContext):
+    await state.set_state(ConvState.video_to_audio)
+    await message.answer("Ок. Пришлите видео.")
 
-# ---------- Handlers Implementation ----------
+@router.message(F.text == "КРУЖОК → АУДИО")
+async def choose_c2a(message: Message, state: FSMContext):
+    await state.set_state(ConvState.circle_to_audio)
+    await message.answer("Ок. Пришлите видеокружок.")
 
-# 1) Видео → аудио (OGG/Opus)
-@dp.message(Flow.audio_from_video)
-async def handle_video_to_audio(message: types.Message, state: FSMContext):
-    video = message.video or message.document if (message.document and message.document.mime_type and message.document.mime_type.startswith("video/")) else None
-    if not video:
-        await message.answer("Пришлите **видеофайл** (mp4/mov).", parse_mode="Markdown")
-        return
+@router.message(F.text == "ГОЛОС → MP3")
+async def choose_vc2mp3(message: Message, state: FSMContext):
+    await state.set_state(ConvState.voice_to_mp3)
+    await message.answer("Ок. Пришлите голосовое сообщение.")
 
-    await message.answer("⏳ Обрабатываю видео...")
-    with tempfile.TemporaryDirectory() as tmp:
-        in_path = Path(tmp) / "input.mp4"
-        out_path = Path(tmp) / "audio.ogg"
-        await (video if isinstance(video, types.Video) else message.document).download(destination=in_path)
+@router.message(F.text == "АУДИО → ГОЛОС")
+async def choose_a2v(message: Message, state: FSMContext):
+    await state.set_state(ConvState.audio_to_voice)
+    await message.answer("Ок. Пришлите аудио (mp3/wav/ogg).")
 
-        cmd = ["ffmpeg", "-i", str(in_path), "-vn", "-acodec", "libopus", "-ar", "48000", "-ac", "1", "-b:a", "64k", str(out_path), "-y"]
-        try:
-            await run_ffmpeg(cmd)
-            await message.answer_document(types.FSInputFile(str(out_path)), caption="Готово: извлечённое аудио (OGG/Opus).")
-        except Exception as e:
-            await message.answer(f"Ошибка: {e}")
+@router.message(F.text == "ВИДЕО/КРУЖОК → ГОЛОС")
+async def choose_any2voice(message: Message, state: FSMContext):
+    await state.set_state(ConvState.vid_or_circle_to_voice)
+    await message.answer("Ок. Пришлите видео или кружок.")
 
+@router.message(F.text == "ВИДЕО → КРУЖОК")
+async def choose_v2circle(message: Message, state: FSMContext):
+    await state.set_state(ConvState.video_to_circle)
+    await message.answer("Ок. Пришлите видео (лучше ≤ 60 с).")
+
+@router.message(F.text == "КРУЖОК → ВИДЕО")
+async def choose_circle2v(message: Message, state: FSMContext):
+    await state.set_state(ConvState.circle_to_video)
+    await message.answer("Ок. Пришлите видеокружок.")
+
+# --- conversions
+
+@router.message(ConvState.video_to_audio, F.video)
+async def handle_video_to_audio(message: Message, state: FSMContext):
+    in_path = await make_in_path_from_file_id(message.video.file_id, ".mp4")
+    out = out_path(".ogg")
+    await run_ffmpeg(["-y", "-i", str(in_path), "-vn", "-ac", "1", "-ar", "48000",
+                      "-c:a", "libopus", "-b:a", "64k", str(out)])
+    await message.answer_audio(audio=FSInputFile(out), caption="Аудио (OGG/Opus)")
     await state.clear()
-    await message.answer("Ещё что-то сделать?", reply_markup=main_menu())
 
-# 2) Кружок → аудио (OGG/Opus)
-@dp.message(Flow.audio_from_circle)
-async def handle_circle_to_audio(message: types.Message, state: FSMContext):
-    if not message.video_note:
-        await message.answer("Пришлите **кружок** (video note).", parse_mode="Markdown")
-        return
-    await message.answer("⏳ Обрабатываю кружок...")
-    with tempfile.TemporaryDirectory() as tmp:
-        in_path = Path(tmp) / "circle.mp4"
-        out_path = Path(tmp) / "audio.ogg"
-        await message.video_note.download(destination=in_path)
-        cmd = ["ffmpeg", "-i", str(in_path), "-vn", "-acodec", "libopus", "-ar", "48000", "-ac", "1", "-b:a", "64k", str(out_path), "-y"]
-        try:
-            await run_ffmpeg(cmd)
-            await message.answer_document(types.FSInputFile(str(out_path)), caption="Готово: звук из кружка (OGG/Opus).")
-        except Exception as e:
-            await message.answer(f"Ошибка: {e}")
+@router.message(ConvState.circle_to_audio, F.video_note)
+async def handle_circle_to_audio(message: Message, state: FSMContext):
+    in_path = await make_in_path_from_file_id(message.video_note.file_id, ".mp4")
+    out = out_path(".ogg")
+    await run_ffmpeg(["-y", "-i", str(in_path), "-vn", "-ac", "1", "-ar", "48000",
+                      "-c:a", "libopus", "-b:a", "64k", str(out)])
+    await message.answer_audio(audio=FSInputFile(out), caption="Аудио (OGG/Opus)")
     await state.clear()
-    await message.answer("Ещё что-то сделать?", reply_markup=main_menu())
 
-# 3) Голосовое → аудио (MP3)
-@dp.message(Flow.audio_from_voice)
-async def handle_voice_to_audio(message: types.Message, state: FSMContext):
-    if not message.voice:
-        await message.answer("Пришлите **голосовое**.", parse_mode="Markdown")
-        return
-    await message.answer("⏳ Конвертирую голосовое в mp3...")
-    with tempfile.TemporaryDirectory() as tmp:
-        in_path = Path(tmp) / "voice.ogg"
-        out_path = Path(tmp) / "voice.mp3"
-        await message.voice.download(destination=in_path)
-        cmd = ["ffmpeg", "-i", str(in_path), "-acodec", "libmp3lame", "-b:a", "128k", str(out_path), "-y"]
-        try:
-            await run_ffmpeg(cmd)
-            await message.answer_document(types.FSInputFile(str(out_path)), caption="Готово: аудиофайл MP3 из голосового.")
-        except Exception as e:
-            await message.answer(f"Ошибка: {e}")
+@router.message(ConvState.voice_to_mp3, F.voice)
+async def handle_voice_to_mp3(message: Message, state: FSMContext):
+    in_path = await make_in_path_from_file_id(message.voice.file_id, ".ogg")
+    out = out_path(".mp3")
+    await run_ffmpeg(["-y", "-i", str(in_path), "-vn", "-c:a", "libmp3lame", "-b:a", "128k", str(out)])
+    await message.answer_audio(audio=FSInputFile(out), caption="MP3 из голосового")
     await state.clear()
-    await message.answer("Ещё что-то сделать?", reply_markup=main_menu())
 
-# 4) Аудио → голосовое (voice OGG/Opus)
-@dp.message(Flow.audio_to_voice)
-async def handle_audio_to_voice(message: types.Message, state: FSMContext):
-    audio = message.audio or message.document if (message.document and message.document.mime_type and message.document.mime_type.startswith("audio/")) else None
-    if not audio:
-        await message.answer("Пришлите **аудиофайл** (mp3/m4a/ogg).", parse_mode="Markdown")
-        return
-    await message.answer("⏳ Делаю voice из аудио...")
-    with tempfile.TemporaryDirectory() as tmp:
-        in_path = Path(tmp) / "in_audio"
-        out_path = Path(tmp) / "voice.ogg"
-        await (audio if isinstance(audio, types.Audio) else message.document).download(destination=in_path)
-        cmd = ["ffmpeg", "-i", str(in_path), "-acodec", "libopus", "-ar", "48000", "-ac", "1", "-b:a", "48k", str(out_path), "-y"]
-        try:
-            await run_ffmpeg(cmd)
-            await message.answer_voice(types.FSInputFile(str(out_path)), caption="Готово: voice.")
-        except Exception as e:
-            await message.answer(f"Ошибка: {e}")
+@router.message(ConvState.audio_to_voice, F.audio)
+async def handle_audio_to_voice(message: Message, state: FSMContext):
+    in_path = await make_in_path_from_file_id(message.audio.file_id, ".mp3")
+    out = out_path(".ogg")
+    await run_ffmpeg(["-y", "-i", str(in_path), "-vn", "-ac", "1", "-ar", "48000",
+                      "-c:a", "libopus", "-b:a", "24k", str(out)])
+    await message.answer_voice(voice=FSInputFile(out), caption="Голосовое из аудио")
     await state.clear()
-    await message.answer("Ещё что-то сделать?", reply_markup=main_menu())
 
-# 5) Видео/Кружок → голосовое (voice)
-@dp.message(Flow.video_to_voice)
-async def handle_video_or_circle_to_voice(message: types.Message, state: FSMContext):
-    src = None
-    kind = None
+@router.message(ConvState.vid_or_circle_to_voice, F.video | F.video_note)
+async def handle_video_or_circle_to_voice(message: Message, state: FSMContext):
     if message.video:
-        src = message.video; kind = "video"
-    elif message.video_note:
-        src = message.video_note; kind = "circle"
-    elif message.document and message.document.mime_type and message.document.mime_type.startswith("video/"):
-        src = message.document; kind = "video"
-    if not src:
-        await message.answer("Пришлите **видео или кружок**.", parse_mode="Markdown"); return
-
-    await message.answer("⏳ Извлекаю звук и делаю voice...")
-    with tempfile.TemporaryDirectory() as tmp:
-        in_path = Path(tmp) / ("input.mp4" if kind != "circle" else "circle.mp4")
-        out_path = Path(tmp) / "voice.ogg"
-        await src.download(destination=in_path)
-        cmd = ["ffmpeg", "-i", str(in_path), "-vn", "-acodec", "libopus", "-ar", "48000", "-ac", "1", "-b:a", "48k", str(out_path), "-y"]
-        try:
-            await run_ffmpeg(cmd)
-            await message.answer_voice(types.FSInputFile(str(out_path)), caption="Готово: voice из видео/кружка.")
-        except Exception as e:
-            await message.answer(f"Ошибка: {e}")
+        file_id = message.video.file_id
+    else:
+        file_id = message.video_note.file_id
+    in_path = await make_in_path_from_file_id(file_id, ".mp4")
+    out = out_path(".ogg")
+    await run_ffmpeg(["-y", "-i", str(in_path), "-vn", "-ac", "1", "-ar", "48000",
+                      "-c:a", "libopus", "-b:a", "32k", str(out)])
+    await message.answer_voice(voice=FSInputFile(out), caption="Голосовое из видео/кружка")
     await state.clear()
-    await message.answer("Ещё что-то сделать?", reply_markup=main_menu())
 
-# 6) Видео → кружок (video note, square h264+aac)
-@dp.message(Flow.video_to_circle)
-async def handle_video_to_circle(message: types.Message, state: FSMContext):
-    video = message.video or message.document if (message.document and message.document.mime_type and message.document.mime_type.startswith("video/")) else None
-    if not video:
-        await message.answer("Пришлите **видеофайл** (mp4/mov).", parse_mode="Markdown")
-        return
-    await message.answer("⏳ Делаю кружок...")
-    with tempfile.TemporaryDirectory() as tmp:
-        in_path = Path(tmp) / "input.mp4"
-        out_path = Path(tmp) / "circle.mp4"
-        await (video if isinstance(video, types.Video) else message.document).download(destination=in_path)
-
-        # square 720x720, pad if needed; h264 + aac
-        vf = "scale=720:720:force_original_aspect_ratio=decrease,pad=720:720:(ow-iw)/2:(oh-ih)/2"
-        cmd = [
-            "ffmpeg", "-i", str(in_path),
-            "-vf", vf,
-            "-vcodec", "libx264", "-preset", "veryfast", "-profile:v", "main", "-level", "3.1", "-b:v", "1200k",
-            "-acodec", "aac", "-b:a", "96k",
-            "-movflags", "+faststart",
-            "-pix_fmt", "yuv420p",
-            str(out_path), "-y"
-        ]
-        try:
-            await run_ffmpeg(cmd)
-            await message.answer_video_note(types.FSInputFile(str(out_path)))
-        except Exception as e:
-            await message.answer(f"Ошибка: {e}")
+@router.message(ConvState.video_to_circle, F.video)
+async def handle_video_to_circle(message: Message, state: FSMContext):
+    in_path = await make_in_path_from_file_id(message.video.file_id, ".mp4")
+    out = out_path(".mp4")
+    # Square pad + sane params for video note
+    vf = "scale=512:512:force_original_aspect_ratio=decrease,pad=512:512:(ow-iw)/2:(oh-ih)/2,setsar=1"
+    await run_ffmpeg(["-y", "-i", str(in_path), "-vf", vf,
+                      "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "main",
+                      "-pix_fmt", "yuv420p",
+                      "-c:a", "aac", "-b:a", "96k",
+                      "-movflags", "+faststart",
+                      str(out)])
+    await message.answer_video_note(video_note=FSInputFile(out), length=512)
     await state.clear()
-    await message.answer("Ещё что-то сделать?", reply_markup=main_menu())
 
-# 7) Кружок → видео (mp4)
-@dp.message(Flow.circle_to_video)
-async def handle_circle_to_video(message: types.Message, state: FSMContext):
-    if not message.video_note:
-        await message.answer("Пришлите **кружок** (video note).", parse_mode="Markdown")
-        return
-    await message.answer("⏳ Конвертирую кружок в видео...")
-    with tempfile.TemporaryDirectory() as tmp:
-        in_path = Path(tmp) / "circle.mp4"
-        out_path = Path(tmp) / "video.mp4"
-        await message.video_note.download(destination=in_path)
-
-        # Перекодируем (на случай несовместимости)
-        cmd = [
-            "ffmpeg", "-i", str(in_path),
-            "-c:v", "libx264", "-preset", "veryfast", "-b:v", "1200k",
-            "-c:a", "aac", "-b:a", "96k",
-            "-movflags", "+faststart",
-            "-pix_fmt", "yuv420p",
-            str(out_path), "-y"
-        ]
-        try:
-            await run_ffmpeg(cmd)
-            await message.answer_video(types.FSInputFile(str(out_path)), caption="Готово: обычное видео (mp4).")
-        except Exception as e:
-            await message.answer(f"Ошибка: {e}")
+@router.message(ConvState.circle_to_video, F.video_note)
+async def handle_circle_to_video(message: Message, state: FSMContext):
+    in_path = await make_in_path_from_file_id(message.video_note.file_id, ".mp4")
+    out = out_path(".mp4")
+    # Just re-mux to a standard MP4 container if needed
+    await run_ffmpeg(["-y", "-i", str(in_path), "-c", "copy", str(out)])
+    await message.answer_video(video=FSInputFile(out), caption="Видео из кружка")
     await state.clear()
-    await message.answer("Ещё что-то сделать?", reply_markup=main_menu())
 
-# ---------- Webhook ----------
+# Fallback: user in wrong state sends wrong type
+@router.message(ConvState.video_to_audio)
+@router.message(ConvState.circle_to_audio)
+@router.message(ConvState.voice_to_mp3)
+@router.message(ConvState.audio_to_voice)
+@router.message(ConvState.vid_or_circle_to_voice)
+@router.message(ConvState.video_to_circle)
+@router.message(ConvState.circle_to_video)
+async def remind_expected(message: Message):
+    await message.answer("Пришлите подходящий файл для выбранной функции 🙂")
+
+# ------------- FastAPI & webhook -------------
+
+app = FastAPI()
+
+@app.get("/ping")
+async def ping():
+    return PlainTextResponse("ok")
+
 @app.post("/")
 async def webhook(request: Request):
     data = await request.json()
     update = Update.model_validate(data)
     await dp.feed_update(bot, update)
-    return {"ok": True}
+    return JSONResponse({"ok": True})

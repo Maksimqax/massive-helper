@@ -2,10 +2,13 @@ services:
   - type: web
     name: massive-helper
     env: python
-    buildCommand: |
-      apt-get update && apt-get install -y ffmpeg
-      pip install -r requirements.txt
+    plan: free
+    buildCommand: pip install -r requirements.txt
     startCommand: bash start.sh
     envVars:
       - key: BOT_TOKEN
         sync: false
+    autoDeploy: false
+    # Install ffmpeg during runtime via apt (supported on Render Python runtime)
+    preDeployCommand: |
+      apt-get update && apt-get install -y ffmpeg || true
