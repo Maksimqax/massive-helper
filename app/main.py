@@ -10,12 +10,12 @@ from fastapi.responses import PlainTextResponse
 
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.types import Message, CallbackQuery, FSInputFile, Update, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.utils.keyboard import ReplyKeyboardBuilder
+from aiogram.enums.chat_action import ChatAction
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.enums import ChatAction
-from aiogram.client.default import DefaultBotProperties
 
 from dotenv import load_dotenv
 
@@ -39,20 +39,17 @@ dp.include_router(router)
 
 app = FastAPI()
 
+
+# ---- Reply Keyboard (always visible) ----
+def reply_kb() -> ReplyKeyboardMarkup:
+    kb = ReplyKeyboardBuilder()
+    kb.button(text="🎧 Аудио")
+    kb.button(text="🎦 Видео / Кружок")
+    kb.button(text="⬅️ Назад")
+    kb.button(text="🏠 Главное меню")
+    kb.adjust(2,2)
+    return kb.as_markup(resize_keyboard=True, input_field_placeholder="Выбери режим или напиши команду…")
 # ---- Keyboards ----
-
-# Persistent reply keyboard near input
-def persistent_kb():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🎧 Аудио"), KeyboardButton(text="🎥 Видео/Кружок")]
-        ],
-        resize_keyboard=True,
-        is_persistent=True,
-        input_field_placeholder="Выберите функцию или пришлите файл…",
-        selective=False
-    )
-
 
 def main_kb():
     kb = InlineKeyboardBuilder()
@@ -63,8 +60,8 @@ def main_kb():
 
 def audio_kb():
     kb = InlineKeyboardBuilder()
-    kb.button(text="🎬→🔊 Из видео", callback_data="audio:from_video")
-    kb.button(text="⭕→🔊 Из кружка", callback_data="audio:from_circle")
+    kb.button(text="🎬→🔊 Из видео", callback_data="audio:from_video")  # из видео извлечём аудио
+    kb.button(text="⭕→🔊 Из кружка", callback_data="audio:from_circle")  # из кружка извлечём аудио
     kb.button(text="🗣️→🔊 Из голосового", callback_data="audio:from_voice")
     kb.button(text="🎵→🗣️ Аудио→Голос", callback_data="audio:audio_to_voice")
     kb.button(text="🎬/⭕→🗣️ Видео/Круг→Голос", callback_data="audio:media_to_voice")
@@ -140,39 +137,23 @@ async def ff_to_voice(src: str) -> str:
     return dst
 
 
-async def show_action(chat_id: int, action: ChatAction):
-    try:
-        await bot.send_chat_action(chat_id, action=action)
-    except Exception:
-        try:
-            await bot.send_chat_action(chat_id, action=ChatAction.TYPING)
-        except Exception:
-            pass
+# ---- Back & Home (reply buttons) ----
+@router.message(F.text == "🏠 Главное меню")
+async def go_home(message: Message, state: FSMContext):
+    await message.answer("Главное меню открытo.", reply_markup=reply_kb())
+    await message.answer("Выберите раздел ниже:", reply_markup=main_kb())
+
+@router.message(F.text == "⬅️ Назад")
+async def go_back(message: Message, state: FSMContext):
+    await go_home(message, state)
+
 # ---- Handlers ----
 
 @router.message(CommandStart())
 async def on_start(message: Message, state: FSMContext):
     await state.clear()
-    welcome = ("<b>Привет!</b> Я медиа-бот. Умею:\n"
-           "• доставать аудио из видео/кружка/голосовых\n"
-           "• делать из видео — кружок и обратно\n"
-           "• конвертировать аудио в голосовое сообщение\n\n"
-           "Выберите раздел ниже или пришлите файл.")
-await message.answer(welcome, reply_markup=persistent_kb())
-await message.answer("Меню функций:", reply_markup=main_kb())
+    await message.answer("Выбери действие:", reply_markup=main_kb())
 
-
-@router.message(F.text == "🎧 Аудио")
-async def open_audio_menu(message: Message, state: FSMContext):
-    await state.set_state(Flow.waiting_input)
-    await state.update_data(action=None)
-    await message.answer("🎧 Аудио: выбери функцию", reply_markup=audio_kb())
-
-@router.message(F.text == "🎥 Видео/Кружок")
-async def open_video_menu(message: Message, state: FSMContext):
-    await state.set_state(Flow.waiting_input)
-    await state.update_data(action=None)
-    await message.answer("🎦 Видео / Кружок: выбери функцию", reply_markup=video_kb())
 @router.callback_query(F.data == "menu:audio")
 async def cb_audio(c: CallbackQuery, state: FSMContext):
     await state.set_state(Flow.waiting_input)
@@ -241,79 +222,82 @@ async def process_media(message: Message, state: FSMContext):
     try:
         if action == "video_to_circle" and message.video:
             src = await tg_download_to_temp(message.video.file_id, ".mp4")
-            await show_action(message.chat.id, ChatAction.RECORD_VIDEO_NOTE)
-            status = await message.answer("🤖 Отправляю видео-кружок…")
             dst = await ff_video_to_circle(src)
-            await message.answer_video_note(FSInputFile(dst))
-            try:
-                await status.delete()
-            except Exception:
-                pass
+            status_msg = await message.answer("🤖 Отправляю видео-кружок…")
+        await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_VIDEO)
+        await message.answer_video_note(FSInputFile(dst))
+        try:
+            await status_msg.edit_text('Готово ✅')
+        except Exception:
+            pass
             await message.answer("Готово ✅")
             return
 
         if action == "circle_to_video" and message.video_note:
             src = await tg_download_to_temp(message.video_note.file_id, ".mp4")
-            await show_action(message.chat.id, ChatAction.UPLOAD_VIDEO)
-            status = await message.answer("🤖 Отправляю видео…")
             dst = await ff_circle_to_video(src)
-            await message.answer_video(FSInputFile(dst))
-            try:
-                await status.delete()
-            except Exception:
-                pass
+            status_msg = await message.answer("🤖 Отправляю видео…")
+        await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_VIDEO)
+        await message.answer_video(FSInputFile(dst))
+        try:
+            await status_msg.edit_text('Готово ✅')
+        except Exception:
+            pass
             await message.answer("Готово ✅")
             return
 
         if action == "audio_from_video" and message.video:
             src = await tg_download_to_temp(message.video.file_id, ".mp4")
-            await show_action(message.chat.id, ChatAction.UPLOAD_AUDIO)
-            status = await message.answer("🤖 Отправляю аудио…")
             dst = await ff_extract_audio(src)
-            await message.answer_audio(FSInputFile(dst))
-            try:
-                await status.delete()
-            except Exception:
-                pass
+            status_msg = await message.answer("🤖 Отправляю аудио…")
+        await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_AUDIO)
+        await message.answer_audio(FSInputFile(dst))
+        try:
+            await status_msg.edit_text('Готово ✅')
+        except Exception:
+            pass
             await message.answer("Готово ✅")
             return
 
         if action == "audio_from_circle" and message.video_note:
             src = await tg_download_to_temp(message.video_note.file_id, ".mp4")
-            await show_action(message.chat.id, ChatAction.UPLOAD_AUDIO)
-            status = await message.answer("🤖 Отправляю аудио…")
             dst = await ff_extract_audio(src)
-            await message.answer_audio(FSInputFile(dst))
-            try:
-                await status.delete()
-            except Exception:
-                pass
+            status_msg = await message.answer("🤖 Отправляю аудио…")
+        await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_AUDIO)
+        await message.answer_audio(FSInputFile(dst))
+        try:
+            await status_msg.edit_text('Готово ✅')
+        except Exception:
+            pass
             await message.answer("Готово ✅")
             return
 
         if action == "audio_from_voice" and message.voice:
             src = await tg_download_to_temp(message.voice.file_id, ".ogg")
-            await show_action(message.chat.id, ChatAction.UPLOAD_AUDIO)
-            status = await message.answer("🤖 Отправляю аудио…")
             dst = await ff_extract_audio(src)
-            await message.answer_audio(FSInputFile(dst))
-            try:
-                await status.delete()
-            except Exception:
-                pass
+            status_msg = await message.answer("🤖 Отправляю аудио…")
+        await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_AUDIO)
+        await message.answer_audio(FSInputFile(dst))
+        try:
+            await status_msg.edit_text('Готово ✅')
+        except Exception:
+            pass
             await message.answer("Готово ✅")
             return
 
         if action == "audio_to_voice" and message.audio:
             src = await tg_download_to_temp(message.audio.file_id, ".mp3")
-            await show_action(message.chat.id, ChatAction.RECORD_VOICE)
-            status = await message.answer("🤖 Записываю голосовое…")
             dst = await ff_to_voice(src)
-            await message.answer_voice(FSInputFile(dst))
-            try:
-                await status.delete()
-            except Exception:
-                pass
+            status_msg = await message.answer("🤖 Записываю голосовое…")
+        await bot.send_chat_action(message.chat.id, ChatAction.RECORD_VOICE)
+        await asyncio.sleep(0)
+        await status_msg.edit_text("🤖 Отправляю голосовое…")
+        await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_VOICE)
+        await message.answer_voice(FSInputFile(dst))
+        try:
+            await status_msg.edit_text('Готово ✅')
+        except Exception:
+            pass
             await message.answer("Готово ✅")
             return
 
@@ -322,14 +306,17 @@ async def process_media(message: Message, state: FSMContext):
             suffix = ".mp4"
             src = await tg_download_to_temp(file_id, suffix)
             tmp_audio = await ff_extract_audio(src)
-            await show_action(message.chat.id, ChatAction.RECORD_VOICE)
-            status = await message.answer("🤖 Записываю голосовое…")
             dst = await ff_to_voice(tmp_audio)
-            await message.answer_voice(FSInputFile(dst))
-            try:
-                await status.delete()
-            except Exception:
-                pass
+            status_msg = await message.answer("🤖 Записываю голосовое…")
+        await bot.send_chat_action(message.chat.id, ChatAction.RECORD_VOICE)
+        await asyncio.sleep(0)
+        await status_msg.edit_text("🤖 Отправляю голосовое…")
+        await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_VOICE)
+        await message.answer_voice(FSInputFile(dst))
+        try:
+            await status_msg.edit_text('Готово ✅')
+        except Exception:
+            pass
             await message.answer("Готово ✅")
             return
 
