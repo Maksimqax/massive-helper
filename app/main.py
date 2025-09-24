@@ -9,9 +9,7 @@ from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import PlainTextResponse
 
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.types import Message, CallbackQuery, FSInputFile, Update, ReplyKeyboardMarkup, KeyboardButton
-from aiogram.utils.keyboard import ReplyKeyboardBuilder
-from aiogram.enums.chat_action import ChatAction
+from aiogram.types import Message, CallbackQuery, FSInputFile, Update
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -39,16 +37,6 @@ dp.include_router(router)
 
 app = FastAPI()
 
-
-# ---- Reply Keyboard (always visible) ----
-def reply_kb() -> ReplyKeyboardMarkup:
-    kb = ReplyKeyboardBuilder()
-    kb.button(text="🎧 Аудио")
-    kb.button(text="🎦 Видео / Кружок")
-    kb.button(text="⬅️ Назад")
-    kb.button(text="🏠 Главное меню")
-    kb.adjust(2,2)
-    return kb.as_markup(resize_keyboard=True, input_field_placeholder="Выбери режим или напиши команду…")
 # ---- Keyboards ----
 
 def main_kb():
@@ -60,8 +48,8 @@ def main_kb():
 
 def audio_kb():
     kb = InlineKeyboardBuilder()
-    kb.button(text="🎬→🔊 Из видео", callback_data="audio:from_video")  # из видео извлечём аудио
-    kb.button(text="⭕→🔊 Из кружка", callback_data="audio:from_circle")  # из кружка извлечём аудио
+    kb.button(text="🎬→🔊 Из видео", callback_data="audio:from_video")
+    kb.button(text="⭕→🔊 Из кружка", callback_data="audio:from_circle")
     kb.button(text="🗣️→🔊 Из голосового", callback_data="audio:from_voice")
     kb.button(text="🎵→🗣️ Аудио→Голос", callback_data="audio:audio_to_voice")
     kb.button(text="🎬/⭕→🗣️ Видео/Круг→Голос", callback_data="audio:media_to_voice")
@@ -135,17 +123,6 @@ async def ff_to_voice(src: str) -> str:
     cmd = ["ffmpeg", "-y", "-i", src, "-c:a", "libopus", "-b:a", "64k", "-vbr", "on", "-ac", "1", "-ar", "48000", dst]
     await run_ffmpeg(cmd)
     return dst
-
-
-# ---- Back & Home (reply buttons) ----
-@router.message(F.text == "🏠 Главное меню")
-async def go_home(message: Message, state: FSMContext):
-    await message.answer("Главное меню открытo.", reply_markup=reply_kb())
-    await message.answer("Выберите раздел ниже:", reply_markup=main_kb())
-
-@router.message(F.text == "⬅️ Назад")
-async def go_back(message: Message, state: FSMContext):
-    await go_home(message, state)
 
 # ---- Handlers ----
 
@@ -223,7 +200,10 @@ async def process_media(message: Message, state: FSMContext):
         if action == "video_to_circle" and message.video:
             src = await tg_download_to_temp(message.video.file_id, ".mp4")
             dst = await ff_video_to_circle(src)
-            status_msg = await message.answer("🤖 Отправляю видео-кружок…")
+            status_msg = await message.answer("🤖 Готовлю видео-кружок…")
+        await bot.send_chat_action(message.chat.id, ChatAction.RECORD_VIDEO)
+        await asyncio.sleep(0)
+        await status_msg.edit_text("🤖 Отправляю видео-кружок…")
         await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_VIDEO)
         await message.answer_video_note(FSInputFile(dst))
         try:
@@ -236,7 +216,10 @@ async def process_media(message: Message, state: FSMContext):
         if action == "circle_to_video" and message.video_note:
             src = await tg_download_to_temp(message.video_note.file_id, ".mp4")
             dst = await ff_circle_to_video(src)
-            status_msg = await message.answer("🤖 Отправляю видео…")
+            status_msg = await message.answer("🤖 Готовлю видео…")
+        await bot.send_chat_action(message.chat.id, ChatAction.RECORD_VIDEO)
+        await asyncio.sleep(0)
+        await status_msg.edit_text("🤖 Отправляю видео…")
         await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_VIDEO)
         await message.answer_video(FSInputFile(dst))
         try:
@@ -249,7 +232,10 @@ async def process_media(message: Message, state: FSMContext):
         if action == "audio_from_video" and message.video:
             src = await tg_download_to_temp(message.video.file_id, ".mp4")
             dst = await ff_extract_audio(src)
-            status_msg = await message.answer("🤖 Отправляю аудио…")
+            status_msg = await message.answer("🤖 Готовлю аудио…")
+        await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_AUDIO)
+        await asyncio.sleep(0)
+        await status_msg.edit_text("🤖 Отправляю аудио…")
         await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_AUDIO)
         await message.answer_audio(FSInputFile(dst))
         try:
@@ -262,7 +248,10 @@ async def process_media(message: Message, state: FSMContext):
         if action == "audio_from_circle" and message.video_note:
             src = await tg_download_to_temp(message.video_note.file_id, ".mp4")
             dst = await ff_extract_audio(src)
-            status_msg = await message.answer("🤖 Отправляю аудио…")
+            status_msg = await message.answer("🤖 Готовлю аудио…")
+        await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_AUDIO)
+        await asyncio.sleep(0)
+        await status_msg.edit_text("🤖 Отправляю аудио…")
         await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_AUDIO)
         await message.answer_audio(FSInputFile(dst))
         try:
@@ -275,7 +264,10 @@ async def process_media(message: Message, state: FSMContext):
         if action == "audio_from_voice" and message.voice:
             src = await tg_download_to_temp(message.voice.file_id, ".ogg")
             dst = await ff_extract_audio(src)
-            status_msg = await message.answer("🤖 Отправляю аудио…")
+            status_msg = await message.answer("🤖 Готовлю аудио…")
+        await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_AUDIO)
+        await asyncio.sleep(0)
+        await status_msg.edit_text("🤖 Отправляю аудио…")
         await bot.send_chat_action(message.chat.id, ChatAction.UPLOAD_AUDIO)
         await message.answer_audio(FSInputFile(dst))
         try:
