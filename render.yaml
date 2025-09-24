@@ -1,16 +1,17 @@
 services:
   - type: web
-    name: tg-media-bot
+    name: massive-helper
     env: python
     plan: free
+    region: frankfurt
     buildCommand: pip install -r requirements.txt
-    startCommand: ./start.sh
+    startCommand: bash start.sh
     envVars:
       - key: BOT_TOKEN
-        sync: false
+        value: ""
       - key: WEBHOOK_URL
-        sync: false
+        value: ""
       - key: SECRET_TOKEN
-        sync: false
+        value: ""
       - key: MAX_FILE_MB
         value: "18"
