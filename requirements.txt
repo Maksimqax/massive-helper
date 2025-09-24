@@ -1,8 +1,5 @@
-aiogram
-fastapi
-uvicorn
-aiohttp
-python-dotenv
-gTTS
-pydub
-ffmpeg-python
+aiogram==3.10.0
+fastapi==0.115.0
+uvicorn==0.30.6
+aiohttp==3.9.5
+python-dotenv==1.1.1
