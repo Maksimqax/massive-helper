@@ -3,6 +3,7 @@ services:
     name: tg-media-bot
     env: python
     plan: free
+    region: frankfurt
     buildCommand: pip install -r requirements.txt
     startCommand: bash start.sh
     envVars:
@@ -14,3 +15,9 @@ services:
         sync: false
       - key: MAX_FILE_MB
         value: "18"
+    autoDeploy: true
+    healthCheckPath: /
+    disk:
+      name: tmp
+      mountPath: /tmp
+      sizeGB: 1
