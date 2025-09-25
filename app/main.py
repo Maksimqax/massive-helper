@@ -604,7 +604,7 @@ async def webhook(request: Request):
 
 # ---- Startup: set webhook ----
 
-@app.on_event(\"startup\")
+@app.on_event("startup")
 async def on_startup():
     init_db()
     if WEBHOOK_URL:
