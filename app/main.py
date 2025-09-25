@@ -9,12 +9,13 @@ from fastapi import FastAPI, Request, Response, HTTPException
 from fastapi.responses import PlainTextResponse
 
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.types import Message, CallbackQuery, FSInputFile, Update
+from aiogram.types import Message, CallbackQuery, FSInputFile, Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.enums import ChatAction
+from aiogram.exceptions import TelegramBadRequest
 
 from dotenv import load_dotenv
 
@@ -43,25 +44,63 @@ app = FastAPI()
 def main_kb():
     kb = InlineKeyboardBuilder()
     kb.button(text="🎧 Аудио", callback_data="menu:audio")
-    kb.button(text="🎦 Видео / Кружок", callback_data="menu:video")
+    kb.button(text="🎦 Видео/Кружок", callback_data="menu:video")
+    kb.adjust(1)
+    return kb.as_markup()
+
+def main_reply_kb():
+    return ReplyKeyboardMarkup(
+        resize_keyboard=True,
+        keyboard=[
+            [KeyboardButton(text="🎦 Видео/Кружок"), KeyboardButton(text="🎧 Аудио")],
+            [KeyboardButton(text="ℹ️ Справка")]
+        ]
+    )
+
+def video_reply_kb():
+    return ReplyKeyboardMarkup(
+        resize_keyboard=True,
+        keyboard=[
+            [KeyboardButton(text="🎥 Видео → ⭕ Кружок")],
+            [KeyboardButton(text="⭕ Кружок → 🎥 Видео")],
+            [KeyboardButton(text="⬅ Назад")]
+        ]
+    )
+
+def audio_reply_kb():
+    return ReplyKeyboardMarkup(
+        resize_keyboard=True,
+        keyboard=[
+            [KeyboardButton(text="🎬 Видео → 🔊 Аудио (MP3)")],
+            [KeyboardButton(text="⭕ Кружок → 🔊 Аудио (MP3)")],
+            [KeyboardButton(text="🗣️ Голосовое → 🔊 Аудио (MP3)")],
+            [KeyboardButton(text="🎵 Аудио → 🗣️ Голосовое")],
+            [KeyboardButton(text="🎬/⭕ Видео/Кружок → 🗣️ Голосовое")],
+            [KeyboardButton(text="⬅ Назад")]
+        ]
+    )
+
+    kb = InlineKeyboardBuilder()
+    kb.button(text="🎧 Аудио", callback_data="menu:audio")
+    kb.button(text="🎦 Видео/Кружок", callback_data="menu:video")
     kb.adjust(1)
     return kb.as_markup()
 
 def audio_kb():
     kb = InlineKeyboardBuilder()
-    kb.button(text="🎬→🔊 Из видео", callback_data="audio:from_video")
-    kb.button(text="⭕→🔊 Из кружка", callback_data="audio:from_circle")
-    kb.button(text="🗣️→🔊 Из голосового", callback_data="audio:from_voice")
-    kb.button(text="🎵→🗣️ Аудио→Голос", callback_data="audio:audio_to_voice")
-    kb.button(text="🎬/⭕→🗣️ Видео/Круг→Голос", callback_data="audio:media_to_voice")
+    kb.button(text="🎬 Видео → 🔊 Аудио (MP3)", callback_data="audio:from_video")
+    kb.button(text="⭕ Кружок → 🔊 Аудио (MP3)", callback_data="audio:from_circle")
+    kb.button(text="🗣️ Голосовое → 🔊 Аудио (MP3)", callback_data="audio:from_voice")
+    kb.button(text="🎵 Аудио → 🗣️ Голосовое", callback_data="audio:audio_to_voice")
+    kb.button(text="🎬/⭕ Видео/Кружок → 🗣️ Голосовое", callback_data="audio:media_to_voice")
     kb.button(text="↩️ Назад", callback_data="menu:back")
     kb.adjust(1)
     return kb.as_markup()
 
 def video_kb():
     kb = InlineKeyboardBuilder()
-    kb.button(text="🎥➡️⭕ Видео → Кружок", callback_data="video:to_circle")
-    kb.button(text="⭕➡️🎥 Кружок → Видео", callback_data="video:to_video")
+    kb.button(text="🎥 Видео → ⭕ Кружок", callback_data="video:to_circle")
+    kb.button(text="⭕ Кружок → 🎥 Видео", callback_data="video:to_video")
     kb.button(text="↩️ Назад", callback_data="menu:back")
     kb.adjust(1)
     return kb.as_markup()
@@ -152,33 +191,54 @@ async def on_start(message: Message, state: FSMContext):
     await state.clear()
     text = (
         "👋 Привет! Я помогу конвертировать медиа:\n"
-        "• 🎥 Видео ↔️ ⭕ Кружок (video note) — теперь **со звуком**\n"
+        "• 🎥 Видео ↔️ ⭕ Кружок (video note)\n"
         "• 🎬/⭕ → 🔊 Аудио\n"
         "• 🎵 Аудио → 🗣️ Голосовое\n\n"
-        "Выбери раздел ниже:"
+        "Выбери раздел на клавиатуре ниже:"
     )
-    await message.answer(text, reply_markup=main_kb())
+    await message.answer(text, reply_markup=main_reply_kb())
 
 
 @router.callback_query(F.data == "menu:audio")
 async def cb_audio(c: CallbackQuery, state: FSMContext):
     await state.set_state(Flow.waiting_input)
     await state.update_data(action=None)  # clear
-    await c.message.edit_text("🎧 Аудио: выбери функцию", reply_markup=audio_kb())
-    await c.answer()
+    try:
+        await c.message.edit_text("🎧 Аудио: выбери функцию", reply_markup=audio_kb())
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            await c.answer("Вы уже в этом меню", show_alert=False)
+        else:
+            raise
+    else:
+        await c.answer()
 
 @router.callback_query(F.data == "menu:video")
 async def cb_video(c: CallbackQuery, state: FSMContext):
     await state.set_state(Flow.waiting_input)
     await state.update_data(action=None)
-    await c.message.edit_text("🎦 Видео / Кружок: выбери функцию", reply_markup=video_kb())
-    await c.answer()
+    try:
+        await c.message.edit_text("🎦 Видео / Кружок: выбери функцию", reply_markup=video_kb())
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            await c.answer("Вы уже в этом меню", show_alert=False)
+        else:
+            raise
+    else:
+        await c.answer()
 
 @router.callback_query(F.data == "menu:back")
 async def cb_back(c: CallbackQuery, state: FSMContext):
     await state.clear()
-    await c.message.edit_text("Выбери действие:", reply_markup=main_kb())
-    await c.answer()
+    try:
+        await c.message.edit_text("Выбери действие:", reply_markup=main_kb())
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            await c.answer("Вы уже в этом меню", show_alert=False)
+        else:
+            raise
+    else:
+        await c.answer()
 
 # Audio actions selection
 
@@ -200,8 +260,15 @@ async def select_audio(c: CallbackQuery, state: FSMContext):
         "media_to_voice": "🗣️ **Видео/кружок → голосовое**\nПришли видео 🎬 или кружок ⭕ — сделаю голосовое (ogg/opus).",
     }
     await state.set_state(Flow.waiting_input)
-    await c.message.edit_text(prompts[m], reply_markup=audio_kb(), parse_mode="Markdown")
-    await c.answer()
+    try:
+        await c.message.edit_text(prompts[m], reply_markup=audio_kb(), parse_mode="Markdown")
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            await c.answer("Вы уже в этом меню", show_alert=False)
+        else:
+            raise
+    else:
+        await c.answer()
 
 
 # Video actions selection
@@ -217,9 +284,72 @@ async def select_video(c: CallbackQuery, state: FSMContext):
         "video_to_circle": "⭕ **Видео → Кружок**\nПришли обычное видео 🎥 — я сделаю из него кружок. Видео должно быть не дольше ~60 сек и не больше лимита файла.\n\nГотов? Отправляй файл.",
         "circle_to_video": "🎥 **Кружок → Видео**\nПришли кружок ⭕ — верну его в обычный видеофайл с квадратной картинкой.\n\nГотов? Отправляй файл.",
     }
-    await c.message.edit_text(prompts[m], reply_markup=video_kb(), parse_mode="Markdown")
-    await c.answer()
+    try:
+        await c.message.edit_text(prompts[m], reply_markup=video_kb(), parse_mode="Markdown")
+    except TelegramBadRequest as e:
+        if "message is not modified" in str(e):
+            await c.answer("Вы уже в этом меню", show_alert=False)
+        else:
+            raise
+    else:
+        await c.answer()
 
+
+
+# ---- Reply Keyboard handlers ----
+
+@router.message(F.text == "🎦 Видео/Кружок")
+async def on_text_menu_video(message: Message, state: FSMContext):
+    await state.set_state(Flow.waiting_input)
+    await state.update_data(action=None)
+    await message.answer("🎦 Видео / Кружок: выбери функцию на клавиатуре ⤵️", reply_markup=video_reply_kb())
+
+@router.message(F.text == "🎧 Аудио")
+async def on_text_menu_audio(message: Message, state: FSMContext):
+    await state.set_state(Flow.waiting_input)
+    await state.update_data(action=None)
+    await message.answer("🎧 Аудио: выбери функцию на клавиатуре ⤵️", reply_markup=audio_reply_kb())
+
+@router.message(F.text == "⬅ Назад")
+async def on_text_back(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("Главное меню:", reply_markup=main_reply_kb())
+
+# Functions (reply keyboard)
+@router.message(F.text == "🎥 Видео → ⭕ Кружок")
+async def on_text_v_to_circle(message: Message, state: FSMContext):
+    await state.update_data(action="video_to_circle")
+    await message.answer("Пришли видео 🎥 — сделаю **кружок** ⭕.", reply_markup=video_reply_kb())
+
+@router.message(F.text == "⭕ Кружок → 🎥 Видео")
+async def on_text_circle_to_v(message: Message, state: FSMContext):
+    await state.update_data(action="circle_to_video")
+    await message.answer("Пришли кружок ⭕ — верну обычное **видео** 🎥.", reply_markup=video_reply_kb())
+
+@router.message(F.text == "🎬 Видео → 🔊 Аудио (MP3)")
+async def on_text_a_from_video(message: Message, state: FSMContext):
+    await state.update_data(action="audio_from_video")
+    await message.answer("Пришли видео 🎬 — достану **аудио (MP3)** 🔊.", reply_markup=audio_reply_kb())
+
+@router.message(F.text == "⭕ Кружок → 🔊 Аудио (MP3)")
+async def on_text_a_from_circle(message: Message, state: FSMContext):
+    await state.update_data(action="audio_from_circle")
+    await message.answer("Пришли кружок ⭕ — достану **аудио (MP3)** 🔊.", reply_markup=audio_reply_kb())
+
+@router.message(F.text == "🗣️ Голосовое → 🔊 Аудио (MP3)")
+async def on_text_a_from_voice(message: Message, state: FSMContext):
+    await state.update_data(action="audio_from_voice")
+    await message.answer("Пришли голосовое 🗣️ — сделаю **аудио (MP3)** 🔊.", reply_markup=audio_reply_kb())
+
+@router.message(F.text == "🎵 Аудио → 🗣️ Голосовое")
+async def on_text_audio_to_voice(message: Message, state: FSMContext):
+    await state.update_data(action="audio_to_voice")
+    await message.answer("Пришли аудиофайл 🎵 — верну **голосовое** 🗣️ (ogg/opus).", reply_markup=audio_reply_kb())
+
+@router.message(F.text == "🎬/⭕ Видео/Кружок → 🗣️ Голосовое")
+async def on_text_media_to_voice(message: Message, state: FSMContext):
+    await state.update_data(action="media_to_voice")
+    await message.answer("Пришли **видео** 🎬 или **кружок** ⭕ — сделаю **голосовое** 🗣️.", reply_markup=audio_reply_kb())
 
 # --- Content handlers (process according to action) ---
 
