@@ -19,6 +19,30 @@ from aiogram.exceptions import TelegramBadRequest
 
 from dotenv import load_dotenv
 
+
+# ---- User Tracking (SQLite) ----
+import sqlite3
+from datetime import date
+
+DB_PATH = "users.sqlite"
+
+def init_db():
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, first_seen TEXT, last_seen TEXT)")
+    cur.execute("CREATE TABLE IF NOT EXISTS hits (dt TEXT, user_id INTEGER, PRIMARY KEY (dt, user_id))")
+    con.commit()
+    con.close()
+
+def touch_user(user_id: int):
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    cur.execute("INSERT OR IGNORE INTO users(user_id, first_seen, last_seen) VALUES (?, datetime('now'), datetime('now'))", (user_id,))
+    cur.execute("UPDATE users SET last_seen = datetime('now') WHERE user_id = ?", (user_id,))
+    cur.execute("INSERT OR IGNORE INTO hits(dt, user_id) VALUES (?, ?)", (date.today().isoformat(), user_id))
+    con.commit()
+    con.close()
+
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -196,13 +220,13 @@ async def ff_to_voice(src: str) -> str:
 async def on_start(message: Message, state: FSMContext):
     await state.clear()
     text = (
-        "👋 Привет! С помощью этого бота можно превратить:\n"
+        "👋 Привет! С помощью этого бота можно превратить:\n\n"
         
-        " 🎥 Видео в ⭕ Кружок\n"
+        " 🎥 Видео в ⭕ Кружок\n\n"
         
-        " ⭕ Кружок в 🎥 Видео\n"
+        " ⭕ Кружок в 🎥 Видео\n\n"
         
-        " 🎥 Видео / ⭕ Кружок в 🔊 Аудиофайл\n"
+        " 🎥 Видео / ⭕ Кружок в 🔊 Аудиофайл\n\n"
         
         " 🔊 Аудиофайл, 🎥 Видео, ⭕ Кружок в 🗣️ Голосовое сообщение\n\n"
         
@@ -256,6 +280,9 @@ async def cb_back(c: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("audio:"))
 async def select_audio(c: CallbackQuery, state: FSMContext):
+    if not await ensure_subscribed(bot, c.from_user.id):
+        await c.message.edit_text('Чтобы пользоваться этой функцией, подпишитесь на канал:', reply_markup=subscribe_keyboard())
+        return
     m = {
         "audio:from_video": "audio_from_video",
         "audio:from_circle": "audio_from_circle",
@@ -287,6 +314,9 @@ async def select_audio(c: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("video:"))
 async def select_video(c: CallbackQuery, state: FSMContext):
+    if not await ensure_subscribed(bot, c.from_user.id):
+        await c.message.edit_text('Чтобы пользоваться этой функцией, подпишитесь на канал:', reply_markup=subscribe_keyboard())
+        return
     m = {
         "video:to_circle": "video_to_circle",
         "video:to_video": "circle_to_video",
@@ -526,3 +556,41 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     await bot.session.close()
+@app.on_event("startup")
+async def on_startup_event():
+    init_db()
+
+@router.message(F.text == "/stats")
+async def stats_cmd(message: Message):
+    if message.from_user.username != "Maksimqax":
+        return
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    total = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    today = cur.execute("SELECT COUNT(*) FROM hits WHERE dt = ?", (date.today().isoformat(),)).fetchone()[0]
+    con.close()
+    await message.answer(f"👥 Всего пользователей: {total}\n📅 Сегодня активных: {today}")
+
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram import types
+
+async def ensure_subscribed(bot: Bot, user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(chat_id="@mediahelperbottt", user_id=user_id)
+        return member.status in ("member","administrator","creator")
+    except Exception:
+        return False
+
+def subscribe_keyboard() -> InlineKeyboardMarkup:
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подписаться", url="https://t.me/mediahelperbottt")],
+        [InlineKeyboardButton(text="🔄 Проверить", callback_data="check_sub")]
+    ])
+    return kb
+
+@router.callback_query(F.data == "check_sub")
+async def cb_check_sub(c: CallbackQuery, bot: Bot):
+    if await ensure_subscribed(bot, c.from_user.id):
+        await c.message.edit_text("✅ Спасибо! Теперь выбери функцию заново в меню.")
+    else:
+        await c.answer("Вы ещё не подписались.", show_alert=True)
