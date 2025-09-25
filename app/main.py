@@ -190,9 +190,9 @@ async def ff_to_voice(src: str) -> str:
 async def on_start(message: Message, state: FSMContext):
     await state.clear()
     text = (
-        "👋 Привет! Я помогу конвертировать медиа:\n"
+        "👋 Привет! Я помогу конвертировать медиа в:\n"
         "• 🎥 Видео ↔️ ⭕ Кружок (video note)\n"
-        "• 🎬/⭕ → 🔊 Аудио\n"
+        "• 🎥 Видео/Кружок ⭕ → 🔊 Аудио\n"
         "• 🎵 Аудио → 🗣️ Голосовое\n\n"
         "Выбери раздел на клавиатуре ниже:"
     )
