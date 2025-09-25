@@ -19,6 +19,7 @@ from aiogram.exceptions import TelegramBadRequest
 
 from dotenv import load_dotenv
 
+load_dotenv()
 
 # ---- User Tracking (SQLite) ----
 import sqlite3
@@ -43,7 +44,6 @@ def touch_user(user_id: int):
     con.commit()
     con.close()
 
-load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
@@ -90,6 +90,29 @@ def video_reply_kb():
             [KeyboardButton(text="⬅ Назад")]
         ]
     )
+
+
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+async def ensure_subscribed(bot: Bot, user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member("@mediahelperbottt", user_id)
+        return getattr(member, "status", None) in ("member","administrator","creator")
+    except Exception:
+        return False
+
+def subscribe_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подписаться", url="https://t.me/mediahelperbottt")],
+        [InlineKeyboardButton(text="🔄 Проверить", callback_data="check_sub")]
+    ])
+
+@router.callback_query(F.data == "check_sub")
+async def cb_check_sub(c: CallbackQuery):
+    if await ensure_subscribed(bot, c.from_user.id):
+        await c.message.edit_text("✅ Спасибо! Теперь выбери функцию заново в меню.")
+    else:
+        await c.answer("Вы ещё не подписались.", show_alert=True)
 
 def audio_reply_kb():
     return ReplyKeyboardMarkup(
@@ -218,15 +241,16 @@ async def ff_to_voice(src: str) -> str:
 
 @router.message(CommandStart())
 async def on_start(message: Message, state: FSMContext):
+    touch_user(message.from_user.id)
     await state.clear()
     text = (
-        "👋 Привет! С помощью этого бота можно превратить:\n\n"
+        "👋 Привет! С помощью этого бота можно превратить:\n"
         
-        " 🎥 Видео в ⭕ Кружок\n\n"
+        " 🎥 Видео в ⭕ Кружок\n"
         
-        " ⭕ Кружок в 🎥 Видео\n\n"
+        " ⭕ Кружок в 🎥 Видео\n"
         
-        " 🎥 Видео / ⭕ Кружок в 🔊 Аудиофайл\n\n"
+        " 🎥 Видео / ⭕ Кружок в 🔊 Аудиофайл\n"
         
         " 🔊 Аудиофайл, 🎥 Видео, ⭕ Кружок в 🗣️ Голосовое сообщение\n\n"
         
@@ -360,44 +384,78 @@ async def on_text_back(message: Message, state: FSMContext):
 # Functions (reply keyboard)
 @router.message(F.text == "🎥 Видео → ⭕ Кружок")
 async def on_text_v_to_circle(message: Message, state: FSMContext):
+    if not await ensure_subscribed(bot, message.from_user.id):
+        await message.answer('Чтобы пользоваться этой функцией, подпишитесь на канал:', reply_markup=subscribe_keyboard())
+        return
     await state.update_data(action="video_to_circle")
     await message.answer("Пришли видео 🎥 — сделаю **кружок** ⭕.", reply_markup=video_reply_kb())
 
 @router.message(F.text == "⭕ Кружок → 🎥 Видео")
 async def on_text_circle_to_v(message: Message, state: FSMContext):
+    if not await ensure_subscribed(bot, message.from_user.id):
+        await message.answer('Чтобы пользоваться этой функцией, подпишитесь на канал:', reply_markup=subscribe_keyboard())
+        return
     await state.update_data(action="circle_to_video")
     await message.answer("Пришли кружок ⭕ — верну обычное **видео** 🎥.", reply_markup=video_reply_kb())
 
 @router.message(F.text == "🎬 Видео → 🔊 Аудио (MP3)")
 async def on_text_a_from_video(message: Message, state: FSMContext):
+    if not await ensure_subscribed(bot, message.from_user.id):
+        await message.answer('Чтобы пользоваться этой функцией, подпишитесь на канал:', reply_markup=subscribe_keyboard())
+        return
     await state.update_data(action="audio_from_video")
     await message.answer("Пришли видео 🎬 — достану **аудио (MP3)** 🔊.", reply_markup=audio_reply_kb())
 
 @router.message(F.text == "⭕ Кружок → 🔊 Аудио (MP3)")
 async def on_text_a_from_circle(message: Message, state: FSMContext):
+    if not await ensure_subscribed(bot, message.from_user.id):
+        await message.answer('Чтобы пользоваться этой функцией, подпишитесь на канал:', reply_markup=subscribe_keyboard())
+        return
     await state.update_data(action="audio_from_circle")
     await message.answer("Пришли кружок ⭕ — достану **аудио (MP3)** 🔊.", reply_markup=audio_reply_kb())
 
 @router.message(F.text == "🗣️ Голосовое → 🔊 Аудио (MP3)")
 async def on_text_a_from_voice(message: Message, state: FSMContext):
+    if not await ensure_subscribed(bot, message.from_user.id):
+        await message.answer('Чтобы пользоваться этой функцией, подпишитесь на канал:', reply_markup=subscribe_keyboard())
+        return
     await state.update_data(action="audio_from_voice")
     await message.answer("Пришли голосовое 🗣️ — сделаю **аудио (MP3)** 🔊.", reply_markup=audio_reply_kb())
 
 @router.message(F.text == "🎵 Аудио → 🗣️ Голосовое")
 async def on_text_audio_to_voice(message: Message, state: FSMContext):
+    if not await ensure_subscribed(bot, message.from_user.id):
+        await message.answer('Чтобы пользоваться этой функцией, подпишитесь на канал:', reply_markup=subscribe_keyboard())
+        return
     await state.update_data(action="audio_to_voice")
     await message.answer("Пришли аудиофайл 🎵 — верну **голосовое** 🗣️ (ogg/opus).", reply_markup=audio_reply_kb())
 
 @router.message(F.text == "🎬/⭕ Видео/Кружок → 🗣️ Голосовое")
 async def on_text_media_to_voice(message: Message, state: FSMContext):
+    if not await ensure_subscribed(bot, message.from_user.id):
+        await message.answer('Чтобы пользоваться этой функцией, подпишитесь на канал:', reply_markup=subscribe_keyboard())
+        return
     await state.update_data(action="media_to_voice")
     await message.answer("Пришли **видео** 🎬 или **кружок** ⭕ — сделаю **голосовое** 🗣️.", reply_markup=audio_reply_kb())
+
+
+@router.message(F.text == "/stats")
+async def stats_cmd(message: Message):
+    if message.from_user.username != "Maksimqax":
+        return
+    con = sqlite3.connect(DB_PATH)
+    cur = con.cursor()
+    total = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    today = cur.execute("SELECT COUNT(*) FROM hits WHERE dt = ?", (date.today().isoformat(),)).fetchone()[0]
+    con.close()
+    await message.answer(f"👥 Всего пользователей: {total}\n📅 Сегодня активных: {today}")
 
 # --- Content handlers (process according to action) ---
 
 
 @router.message(F.video | F.video_note | F.voice | F.audio, Flow.waiting_input)
 async def process_media(message: Message, state: FSMContext):
+    touch_user(message.from_user.id)
     data = await state.get_data()
     action = data.get("action")
     if not action:
@@ -546,8 +604,9 @@ async def webhook(request: Request):
 
 # ---- Startup: set webhook ----
 
-@app.on_event("startup")
+@app.on_event(\"startup\")
 async def on_startup():
+    init_db()
     if WEBHOOK_URL:
         await bot.set_webhook(url=WEBHOOK_URL, secret_token=(SECRET_TOKEN or None))
     else:
@@ -556,41 +615,3 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     await bot.session.close()
-@app.on_event("startup")
-async def on_startup_event():
-    init_db()
-
-@router.message(F.text == "/stats")
-async def stats_cmd(message: Message):
-    if message.from_user.username != "Maksimqax":
-        return
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    total = cur.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-    today = cur.execute("SELECT COUNT(*) FROM hits WHERE dt = ?", (date.today().isoformat(),)).fetchone()[0]
-    con.close()
-    await message.answer(f"👥 Всего пользователей: {total}\n📅 Сегодня активных: {today}")
-
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram import types
-
-async def ensure_subscribed(bot: Bot, user_id: int) -> bool:
-    try:
-        member = await bot.get_chat_member(chat_id="@mediahelperbottt", user_id=user_id)
-        return member.status in ("member","administrator","creator")
-    except Exception:
-        return False
-
-def subscribe_keyboard() -> InlineKeyboardMarkup:
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Подписаться", url="https://t.me/mediahelperbottt")],
-        [InlineKeyboardButton(text="🔄 Проверить", callback_data="check_sub")]
-    ])
-    return kb
-
-@router.callback_query(F.data == "check_sub")
-async def cb_check_sub(c: CallbackQuery, bot: Bot):
-    if await ensure_subscribed(bot, c.from_user.id):
-        await c.message.edit_text("✅ Спасибо! Теперь выбери функцию заново в меню.")
-    else:
-        await c.answer("Вы ещё не подписались.", show_alert=True)
