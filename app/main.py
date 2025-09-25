@@ -190,11 +190,15 @@ async def ff_to_voice(src: str) -> str:
 async def on_start(message: Message, state: FSMContext):
     await state.clear()
     text = (
-        "👋 Привет! Я помогу конвертировать медиа в:\n"
-        "• 🎥 Видео ↔️ ⭕ Кружок (video note)\n"
-        "• 🎥 Видео/Кружок ⭕ → 🔊 Аудио\n"
-        "• 🎵 Аудио → 🗣️ Голосовое\n\n"
-        "Выбери раздел на клавиатуре ниже:"
+        "👋 Привет! С помощью этого бота можно превратить:\n"
+        
+        " 🎥 Видео в ⭕ Кружок (video note)\n"
+        
+        " 🎥 Видео / Кружок ⭕ в 🔊 Аудиофайл\n"
+        
+        " 🎵 Аудиофайл в 🗣️ Голосовое сообщение\n\n"
+        
+        "Выбери нужный раздел в меню ниже:"
     )
     await message.answer(text, reply_markup=main_reply_kb())
 
