@@ -176,6 +176,12 @@ async def ff_extract_audio(src: str) -> str:
     await run_ffmpeg(cmd)
     return dst
 
+async def ff_to_mp3(src: str) -> str:
+    dst = src.rsplit(".", 1)[0] + ".mp3"
+    cmd = ["ffmpeg", "-y", "-i", src, "-vn", "-acodec", "libmp3lame", "-ar", "48000", "-b:a", "128k", dst]
+    await run_ffmpeg(cmd)
+    return dst
+
 async def ff_to_voice(src: str) -> str:
     """Any audio -> ogg/opus voice."""
     dst = src.rsplit(".", 1)[0] + ".ogg"
@@ -406,7 +412,7 @@ async def process_media(message: Message, state: FSMContext):
                 dst = await ff_extract_audio(src)
             finally:
                 act.cancel()
-            await bot.send_chat_action(message.chat.id, action=ChatAction.UPLOAD_AUDIO)
+            await bot.send_chat_action(message.chat.id, action=ChatAction.UPLOAD_DOCUMENT)
             await message.answer_audio(FSInputFile(dst))
             await message.answer("Готово ✅")
             return
@@ -419,7 +425,7 @@ async def process_media(message: Message, state: FSMContext):
                 dst = await ff_extract_audio(src)
             finally:
                 act.cancel()
-            await bot.send_chat_action(message.chat.id, action=ChatAction.UPLOAD_AUDIO)
+            await bot.send_chat_action(message.chat.id, action=ChatAction.UPLOAD_DOCUMENT)
             await message.answer_audio(FSInputFile(dst))
             await message.answer("Готово ✅")
             return
@@ -432,7 +438,7 @@ async def process_media(message: Message, state: FSMContext):
                 dst = await ff_to_mp3(src)
             finally:
                 act.cancel()
-            await bot.send_chat_action(message.chat.id, action=ChatAction.UPLOAD_AUDIO)
+            await bot.send_chat_action(message.chat.id, action=ChatAction.UPLOAD_DOCUMENT)
             await message.answer_audio(FSInputFile(dst))
             await message.answer("Готово ✅")
             return
