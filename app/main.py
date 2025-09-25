@@ -248,7 +248,7 @@ async def ff_to_mp3(src: str) -> str:
 @router.message(CommandStart())
 async def on_start(message: Message, state: FSMContext):
     await state.clear()
-       text = (
+    text = (
         "👋 Привет! С помощью этого бота можно превратить:\n"
         
         " 🎥 Видео в ⭕ Кружок\n"
