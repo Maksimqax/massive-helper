@@ -53,7 +53,7 @@ def main_reply_kb():
         resize_keyboard=True,
         keyboard=[
             [KeyboardButton(text="🎦 Видео/Кружок"), KeyboardButton(text="🎧 Аудио")],
-            
+            [KeyboardButton(text="ℹ️ Справка")]
         ]
     )
 
@@ -147,21 +147,7 @@ async def tg_download_to_temp(file_id: str, suffix: str) -> str:
     return path
 
 
-
-async def ff_extract_audio(src: str) -> str:
-    """Extract audio track to mp3 from any media."""
-    dst = src.rsplit(".", 1)[0] + ".mp3"
-    cmd = ["ffmpeg", "-y", "-i", src, "-vn", "-acodec", "libmp3lame", "-ar", "48000", "-b:a", "128k", dst]
-    await run_ffmpeg(cmd)
-    return dst
-
-async def ff_to_mp3(src: str) -> str:
-    """Any audio (incl. ogg/opus) -> mp3 128k 48kHz."""
-    dst = src.rsplit(".", 1)[0] + ".mp3"
-    cmd = ["ffmpeg", "-y", "-i", src, "-vn", "-acodec", "libmp3lame", "-ar", "48000", "-b:a", "128k", dst]
-    await run_ffmpeg(cmd)
-    return dst
-
+async def ff_video_to_circle(src: str) -> str:
     """Crop to square for video_note and **preserve audio** (AAC)."""
     dst = src.rsplit(".", 1)[0] + "_circle.mp4"
     # 1:1 square, 480x480, keep audio (AAC), 30fps
@@ -184,21 +170,7 @@ async def ff_circle_to_video(src: str) -> str:
     await run_ffmpeg(cmd)
     return dst
 
-async def ff_to_mp3(src: str) -> str:
-    """Any audio (incl. ogg/opus) -> mp3 128k 48kHz."""
-    dst = src.rsplit(".", 1)[0] + ".mp3"
-    cmd = ["ffmpeg", "-y", "-i", src, "-vn", "-acodec", "libmp3lame", "-ar", "48000", "-b:a", "128k", dst]
-    await run_ffmpeg(cmd)
-    return dst
-
-async def ff_to_mp3(src: str) -> str:
-    """Any audio (incl. ogg/opus) -> mp3 128k 48kHz."""
-    dst = src.rsplit(".", 1)[0] + ".mp3"
-    cmd = ["ffmpeg", "-y", "-i", src, "-vn", "-acodec", "libmp3lame", "-ar", "48000", "-b:a", "128k", dst]
-    await run_ffmpeg(cmd)
-    return dst
-
-
+async def ff_extract_audio(src: str) -> str:
     dst = src.rsplit(".", 1)[0] + ".mp3"
     cmd = ["ffmpeg", "-y", "-i", src, "-vn", "-acodec", "libmp3lame", "-ar", "48000", "-b:a", "128k", dst]
     await run_ffmpeg(cmd)
@@ -208,37 +180,6 @@ async def ff_to_voice(src: str) -> str:
     """Any audio -> ogg/opus voice."""
     dst = src.rsplit(".", 1)[0] + ".ogg"
     cmd = ["ffmpeg", "-y", "-i", src, "-c:a", "libopus", "-b:a", "64k", "-vbr", "on", "-ac", "1", "-ar", "48000", dst]
-    await run_ffmpeg(cmd)
-    return dst
-
-
-async def ff_video_to_circle(src: str) -> str:
-    """Crop to square for video_note and preserve audio (AAC)."""
-    dst = src.rsplit(".", 1)[0] + "_circle.mp4"
-    vf = "crop='min(iw,ih)':'min(iw,ih)',scale=480:480:flags=lanczos,fps=30,format=yuv420p"
-    cmd = [
-        "ffmpeg", "-y", "-i", src,
-        "-vf", vf,
-        "-c:v", "libx264", "-preset", "veryfast", "-profile:v", "baseline", "-level", "3.0",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "128k", "-ac", "2", "-ar", "48000",
-        "-movflags", "+faststart",
-        dst
-    ]
-    await run_ffmpeg(cmd)
-    return dst
-
-async def ff_extract_audio(src: str) -> str:
-    """Extract audio track to mp3 from any media."""
-    dst = src.rsplit(".", 1)[0] + ".mp3"
-    cmd = ["ffmpeg", "-y", "-i", src, "-vn", "-acodec", "libmp3lame", "-ar", "48000", "-b:a", "128k", dst]
-    await run_ffmpeg(cmd)
-    return dst
-
-async def ff_to_mp3(src: str) -> str:
-    """Any audio (incl. ogg/opus) -> mp3 128k 48kHz."""
-    dst = src.rsplit(".", 1)[0] + ".mp3"
-    cmd = ["ffmpeg", "-y", "-i", src, "-vn", "-acodec", "libmp3lame", "-ar", "48000", "-b:a", "128k", dst]
     await run_ffmpeg(cmd)
     return dst
 
@@ -465,7 +406,7 @@ async def process_media(message: Message, state: FSMContext):
                 dst = await ff_extract_audio(src)
             finally:
                 act.cancel()
-            await bot.send_chat_action(message.chat.id, action=ChatAction.UPLOAD_DOCUMENT)
+            await bot.send_chat_action(message.chat.id, action=ChatAction.UPLOAD_AUDIO)
             await message.answer_audio(FSInputFile(dst))
             await message.answer("Готово ✅")
             return
@@ -478,7 +419,7 @@ async def process_media(message: Message, state: FSMContext):
                 dst = await ff_extract_audio(src)
             finally:
                 act.cancel()
-            await bot.send_chat_action(message.chat.id, action=ChatAction.UPLOAD_DOCUMENT)
+            await bot.send_chat_action(message.chat.id, action=ChatAction.UPLOAD_AUDIO)
             await message.answer_audio(FSInputFile(dst))
             await message.answer("Готово ✅")
             return
@@ -491,7 +432,7 @@ async def process_media(message: Message, state: FSMContext):
                 dst = await ff_to_mp3(src)
             finally:
                 act.cancel()
-            await bot.send_chat_action(message.chat.id, action=ChatAction.UPLOAD_DOCUMENT)
+            await bot.send_chat_action(message.chat.id, action=ChatAction.UPLOAD_AUDIO)
             await message.answer_audio(FSInputFile(dst))
             await message.answer("Готово ✅")
             return
@@ -538,6 +479,11 @@ async def process_media(message: Message, state: FSMContext):
         await message.answer("❌ Ошибка обработки файла.")
         print("ERROR:", repr(e))
 
+
+
+@app.get("/health")
+async def health():
+    return PlainTextResponse("ok")
 # ---- FastAPI part ----
 
 
